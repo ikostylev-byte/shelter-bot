@@ -146,7 +146,10 @@ def shelter_type_ru(t):
         "מקלט ציבורי":                "🏗️ Общественное убежище",
         "מקלט ציבורי נגיש":           "♿ Доступное убежище",
         "מקלט בשטח חניון":            "🅿️ Убежище (парковка)",
+        "מקלט פנימי בשטח בית ספר":    "🏫 Убежище (школа)",
         "מרחב מוגן קהילתי":           "🏢 Общественное убежище",
+        "מתקן מגון מני ילדים":        "👶 Убежище (дети)",
+        "מתקן מגון רווחה":            "🏥 Убежище (соцслужба)",
         'ממ"ד': "🏠 Мамад", "ממד": "🏠 Мамад",
     }
     for h, r in m.items():
@@ -175,19 +178,38 @@ def parse_shelter(feat, ulat, ulon):
 
 
 def fetch_shelters(lat, lon):
+    # Попытка 1: spatial query
     params = {
         "where": "1=1", "geometry": f"{lon},{lat}",
         "geometryType": "esriGeometryPoint", "inSR": "4326",
         "spatialRel": "esriSpatialRelIntersects",
         "distance": SEARCH_RADIUS_M, "units": "esriSRUnit_Meter",
         "outFields": "*", "outSR": "4326", "returnGeometry": "true",
-        "f": "json", "resultRecordCount": 50,
+        "f": "json", "resultRecordCount": 100,
     }
     r = requests.get(ARCGIS_URL, params=params, timeout=15)
     r.raise_for_status()
     data = r.json()
     if "error" in data: raise RuntimeError(data["error"])
-    shelters = [parse_shelter(f, lat, lon) for f in data.get("features", []) if f.get("geometry")]
+    features = data.get("features", [])
+
+    # Fallback: если spatial вернул 0 — берём всё и фильтруем вручную
+    if not features:
+        logger.warning("Spatial query вернул 0, пробуем fallback")
+        params2 = {
+            "where": "1=1", "outFields": "*", "outSR": "4326",
+            "returnGeometry": "true", "f": "json", "resultRecordCount": 500,
+        }
+        r2 = requests.get(ARCGIS_URL, params=params2, timeout=15)
+        r2.raise_for_status()
+        data2 = r2.json()
+        features = [
+            f for f in data2.get("features", [])
+            if f.get("geometry") and
+               haversine(lat, lon, f["geometry"].get("y", 0), f["geometry"].get("x", 0)) <= SEARCH_RADIUS_M
+        ]
+
+    shelters = [parse_shelter(f, lat, lon) for f in features if f.get("geometry")]
     shelters.sort(key=lambda x: x["distance"])
     return shelters[:MAX_RESULTS]
 
