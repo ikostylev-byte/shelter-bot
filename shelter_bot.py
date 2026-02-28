@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-ялла, миклат! 🛡️
+ялла, миклат! 🛡️  — Всеизраильская версия
 Отправляешь геолокацию — получаешь карту с 5 ближайшими убежищами.
+
+Источники данных:
+1. OpenStreetMap (Overpass API) — вся страна
+2. ArcGIS Тель-Авива — дополнительные данные для ТА
 """
 
 import os, math, logging, asyncpg, requests
@@ -18,21 +22,152 @@ from telegram.constants import ParseMode
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
+
+# ─── ИСТОЧНИКИ ДАННЫХ ────────────────────────────────────────────────────────
+# Tel Aviv ArcGIS — оставляем как дополнительный для ТА
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
+# Overpass API — основной всеизраильский
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
 SEARCH_RADIUS_M = 2000
 MAX_RESULTS     = 5
 CHECKIN_TTL_H   = 2
+
+# Границы Тель-Авива (примерно) для определения нужен ли ArcGIS fallback
+TA_BOUNDS = {"lat_min": 32.03, "lat_max": 32.15, "lon_min": 34.74, "lon_max": 34.82}
 
 REVIEW_TEXT, REVIEW_PHOTO = range(2)
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Кнопка геолокации внизу экрана
-LOCATION_KB = ReplyKeyboardMarkup(
-    [[KeyboardButton("📍 Отправить геолокацию", request_location=True)]],
-    resize_keyboard=True, one_time_keyboard=False,
-)
+# ─── МУЛЬТИЯЗЫЧНОСТЬ ─────────────────────────────────────────────────────────
+# Простейший i18n: юзер выбирает язык командой /lang
+TEXTS = {
+    "ru": {
+        "welcome":      "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища.",
+        "send_loc":     "📍 Отправить геолокацию",
+        "no_shelters":  "😔 Убежищ в радиусе {radius} м не найдено.\nКоординаты: {lat:.5f}, {lon:.5f}\n\nПопробуй увеличить радиус /radius или поискать на Google Maps: מקלט ציבורי",
+        "map_legend":   "🔵 ты   🔴 убежища",
+        "shelter_type":  "🛡️ Убежище",
+        "choose":       "*Выбери убежище:*\n",
+        "distance":     "м",
+        "checkin_done":  "✅ Отмечен в *{name}*\nЧекин активен {ttl} часа.",
+        "buddies_here": "👥 Ещё здесь: {names}",
+        "nobody_here":  "😶 Ты пока первый здесь.",
+        "checkout_done": "🚪 Ты покинул убежище.",
+        "not_checked":  "Ты не отмечен ни в одном убежище.",
+        "review_ask":   "✍️ Отзыв для *{addr}*\n\nНапиши текст (или /skip → сразу к фото):",
+        "review_photo": "📷 Фото убежища (или /skip):",
+        "review_saved": "✅ Отзыв сохранён, спасибо!",
+        "review_cancel": "Отменено.",
+        "btn_going":    "🤝 Иду сюда",
+        "btn_review":   "✍️ Отзыв",
+        "btn_leave":    "🚪 Покинуть",
+        "btn_back":     "← Назад",
+        "going_header":  "🤝 *Идут сюда ({count}):*",
+        "nobody_going": "🤝 *Пока никто не отметился*",
+        "reviews_hdr":  "💬 *Отзывы:*",
+        "send_loc_btn": "📍 Нажми кнопку внизу:",
+        "choose_lang":  "Выбери язык / בחר שפה / Choose language:",
+        "lang_set":     "✅ Язык: Русский",
+        "error":        "❌ Ошибка: {err}",
+        "search_error": "❌ Ошибка при поиске: {err}",
+        "map_error":    "⚠️ Карта не загрузилась: {err}",
+        "found":        "*Найдено {count} убежищ:*\n",
+        "source_osm":   "📡 OSM",
+        "source_ta":    "📡 ТА GIS",
+        "photo_or_skip": "Фото или /skip:",
+    },
+    "he": {
+        "welcome":      "🛡️ *יאללה, מקלט!*\n\nשלח מיקום — אראה לך את המקלטים הקרובים.",
+        "send_loc":     "📍 שלח מיקום",
+        "no_shelters":  "😔 לא נמצאו מקלטים ברדיוס {radius} מ'.\nקואורדינטות: {lat:.5f}, {lon:.5f}\n\nחפש ב-Google Maps: מקלט ציבורי",
+        "map_legend":   "🔵 אתה   🔴 מקלטים",
+        "shelter_type":  "🛡️ מקלט",
+        "choose":       "*בחר מקלט:*\n",
+        "distance":     "מ'",
+        "checkin_done":  "✅ נרשמת ב-*{name}*\nהצ'ק-אין פעיל {ttl} שעות.",
+        "buddies_here": "👥 גם כאן: {names}",
+        "nobody_here":  "😶 אתה הראשון כאן.",
+        "checkout_done": "🚪 יצאת מהמקלט.",
+        "not_checked":  "לא רשום באף מקלט.",
+        "review_ask":   "✍️ ביקורת על *{addr}*\n\nכתוב טקסט (או /skip → ישר לתמונה):",
+        "review_photo": "📷 תמונה של המקלט (או /skip):",
+        "review_saved": "✅ הביקורת נשמרה, תודה!",
+        "review_cancel": "בוטל.",
+        "btn_going":    "🤝 אני בדרך",
+        "btn_review":   "✍️ ביקורת",
+        "btn_leave":    "🚪 יציאה",
+        "btn_back":     "← חזרה",
+        "going_header":  "🤝 *בדרך לכאן ({count}):*",
+        "nobody_going": "🤝 *אף אחד עדיין לא נרשם*",
+        "reviews_hdr":  "💬 *ביקורות:*",
+        "send_loc_btn": "📍 לחץ על הכפתור למטה:",
+        "choose_lang":  "Выбери язык / בחר שפה / Choose language:",
+        "lang_set":     "✅ שפה: עברית",
+        "error":        "❌ שגיאה: {err}",
+        "search_error": "❌ שגיאה בחיפוש: {err}",
+        "map_error":    "⚠️ המפה לא נטענה: {err}",
+        "found":        "*נמצאו {count} מקלטים:*\n",
+        "source_osm":   "📡 OSM",
+        "source_ta":    "📡 GIS ת\"א",
+        "photo_or_skip": "תמונה או /skip:",
+    },
+    "en": {
+        "welcome":      "🛡️ *Yalla, Miklat!*\n\nSend your location — I'll show the nearest shelters.",
+        "send_loc":     "📍 Send location",
+        "no_shelters":  "😔 No shelters within {radius} m.\nCoords: {lat:.5f}, {lon:.5f}\n\nTry Google Maps: מקלט ציבורי nearby",
+        "map_legend":   "🔵 you   🔴 shelters",
+        "shelter_type":  "🛡️ Shelter",
+        "choose":       "*Choose a shelter:*\n",
+        "distance":     "m",
+        "checkin_done":  "✅ Checked in at *{name}*\nActive for {ttl} hours.",
+        "buddies_here": "👥 Also here: {names}",
+        "nobody_here":  "😶 You're the first one here.",
+        "checkout_done": "🚪 You left the shelter.",
+        "not_checked":  "Not checked in to any shelter.",
+        "review_ask":   "✍️ Review for *{addr}*\n\nWrite text (or /skip for photo):",
+        "review_photo": "📷 Photo of shelter (or /skip):",
+        "review_saved": "✅ Review saved, thanks!",
+        "review_cancel": "Cancelled.",
+        "btn_going":    "🤝 Going here",
+        "btn_review":   "✍️ Review",
+        "btn_leave":    "🚪 Leave",
+        "btn_back":     "← Back",
+        "going_header":  "🤝 *Heading here ({count}):*",
+        "nobody_going": "🤝 *No one checked in yet*",
+        "reviews_hdr":  "💬 *Reviews:*",
+        "send_loc_btn": "📍 Tap the button below:",
+        "choose_lang":  "Выбери язык / בחר שפה / Choose language:",
+        "lang_set":     "✅ Language: English",
+        "error":        "❌ Error: {err}",
+        "search_error": "❌ Search error: {err}",
+        "map_error":    "⚠️ Map failed: {err}",
+        "found":        "*Found {count} shelters:*\n",
+        "source_osm":   "📡 OSM",
+        "source_ta":    "📡 TA GIS",
+        "photo_or_skip": "Photo or /skip:",
+    },
+}
+
+def t(ctx, key, **kwargs):
+    """Получить текст на языке юзера."""
+    lang = (ctx.user_data or {}).get("lang", "ru")
+    template = TEXTS.get(lang, TEXTS["ru"]).get(key, TEXTS["ru"].get(key, key))
+    try:
+        return template.format(**kwargs) if kwargs else template
+    except (KeyError, IndexError):
+        return template
+
+def get_location_kb(ctx):
+    lang = (ctx.user_data or {}).get("lang", "ru")
+    label = TEXTS.get(lang, TEXTS["ru"])["send_loc"]
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(label, request_location=True)]],
+        resize_keyboard=True, one_time_keyboard=False,
+    )
+
 
 _pool = None
 
@@ -71,6 +206,12 @@ async def db_init():
                 lat DOUBLE PRECISION,
                 lon DOUBLE PRECISION,
                 checked_in_at TIMESTAMPTZ DEFAULT NOW()
+            )""")
+        # Таблица для хранения языковых настроек
+        await c.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id BIGINT PRIMARY KEY,
+                lang TEXT DEFAULT 'ru'
             )""")
     logger.info("DB ready")
 
@@ -128,6 +269,22 @@ async def get_my_checkin(user_id):
             "SELECT * FROM checkins WHERE user_id=$1 AND checked_in_at>$2", user_id, cutoff)
 
 
+async def save_user_lang(user_id, lang):
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        await c.execute("""
+            INSERT INTO user_settings (user_id, lang) VALUES($1, $2)
+            ON CONFLICT(user_id) DO UPDATE SET lang=EXCLUDED.lang
+        """, user_id, lang)
+
+
+async def load_user_lang(user_id):
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        row = await c.fetchrow("SELECT lang FROM user_settings WHERE user_id=$1", user_id)
+        return row["lang"] if row else "ru"
+
+
 # ─── GIS ──────────────────────────────────────────────────────────────────────
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -138,47 +295,153 @@ def haversine(lat1, lon1, lat2, lon2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 
-def shelter_type_ru(t):
-    if not t: return "🛡️ Убежище"
-    m = {
-        "חניון מחסה לציבור":          "🅿️ Паркинг-убежище",
-        "מקלט ציבורי במוסדות חינוך":  "🏫 Убежище (школа)",
-        "מקלט ציבורי":                "🏗️ Общественное убежище",
-        "מקלט ציבורי נגיש":           "♿ Доступное убежище",
-        "מקלט בשטח חניון":            "🅿️ Убежище (парковка)",
-        "מקלט פנימי בשטח בית ספר":    "🏫 Убежище (школа)",
-        "מרחב מוגן קהילתי":           "🏢 Общественное убежище",
-        "מתקן מגון מני ילדים":        "👶 Убежище (дети)",
-        "מתקן מגון רווחה":            "🏥 Убежище (соцслужба)",
-        'ממ"ד': "🏠 Мамад", "ממד": "🏠 Мамад",
+def is_in_tel_aviv(lat, lon):
+    """Проверяем, попадает ли точка в примерные границы ТА."""
+    return (TA_BOUNDS["lat_min"] <= lat <= TA_BOUNDS["lat_max"] and
+            TA_BOUNDS["lon_min"] <= lon <= TA_BOUNDS["lon_max"])
+
+
+def shelter_type_label(raw_type, lang="ru"):
+    """Универсальная типизация убежищ."""
+    if not raw_type:
+        return TEXTS.get(lang, TEXTS["ru"])["shelter_type"]
+
+    # Ивритские типы (из ArcGIS ТА)
+    he_map = {
+        "חניון מחסה לציבור":          ("🅿️", "Паркинг-убежище", "חניון מחסה", "Parking shelter"),
+        "מקלט ציבורי במוסדות חינוך":  ("🏫", "Убежище (школа)", "מקלט בית ספר", "School shelter"),
+        "מקלט ציבורי":                ("🏗️", "Общ. убежище", "מקלט ציבורי", "Public shelter"),
+        "מקלט ציבורי נגיש":           ("♿", "Доступное убежище", "מקלט נגיש", "Accessible shelter"),
+        "מקלט בשטח חניון":            ("🅿️", "Убежище (парковка)", "מקלט חניון", "Parking shelter"),
+        "מקלט פנימי בשטח בית ספר":    ("🏫", "Убежище (школа)", "מקלט בית ספר", "School shelter"),
+        "מרחב מוגן קהילתי":           ("🏢", "Общ. убежище", "מרחב מוגן", "Community shelter"),
+        "מתקן מגון מני ילדים":        ("👶", "Убежище (дети)", "מקלט ילדים", "Children shelter"),
+        "מתקן מגון רווחה":            ("🏥", "Убежище (соцслужба)", "מקלט רווחה", "Welfare shelter"),
+        'ממ"ד':                        ("🏠", "Мамад", "ממ\"ד", "Mamad"),
+        "ממד":                         ("🏠", "Мамад", "ממ\"ד", "Mamad"),
     }
-    for h, r in m.items():
-        if h in t: return r
-    return f"🛡️ {t}"
+    lang_idx = {"ru": 1, "he": 2, "en": 3}[lang] if lang in ("ru", "he", "en") else 1
+    for h, labels in he_map.items():
+        if h in raw_type:
+            return f"{labels[0]} {labels[lang_idx]}"
+
+    # OSM типы
+    osm_map = {
+        "bomb_shelter":  ("🛡️", "Бомбоубежище", "מקלט", "Bomb shelter"),
+        "bunker":        ("🏗️", "Бункер", "בונקר", "Bunker"),
+        "public":        ("🏢", "Общ. убежище", "מקלט ציבורי", "Public shelter"),
+    }
+    for key, labels in osm_map.items():
+        if key in raw_type.lower():
+            return f"{labels[0]} {labels[lang_idx]}"
+
+    return f"🛡️ {raw_type}"
 
 
-def parse_shelter(feat, ulat, ulon):
+# ── OVERPASS API (OSM) — ВСЕИЗРАИЛЬСКИЙ ИСТОЧНИК ──────────────────────────────
+
+def fetch_shelters_osm(lat, lon, radius_m=None):
+    """Ищем убежища через Overpass API в радиусе вокруг точки."""
+    if radius_m is None:
+        radius_m = SEARCH_RADIUS_M
+
+    query = f"""
+    [out:json][timeout:15];
+    (
+      nwr["amenity"="shelter"]["shelter_type"="bomb_shelter"](around:{radius_m},{lat},{lon});
+      nwr["military"="bunker"](around:{radius_m},{lat},{lon});
+      nwr["building"="bunker"](around:{radius_m},{lat},{lon});
+      nwr["bunker_type"="bomb_shelter"](around:{radius_m},{lat},{lon});
+      nwr["amenity"="shelter"]["shelter_type"="public_transport"!~"."](around:{radius_m},{lat},{lon});
+    );
+    out center body;
+    """
+    # Последняя строка: shelter без shelter_type=public_transport (чтобы не грести автобусные остановки)
+    # Но это слишком широко. Убираем последнюю строку, оставляем только bomb_shelter и bunker
+    query = f"""
+    [out:json][timeout:15];
+    (
+      nwr["amenity"="shelter"]["shelter_type"="bomb_shelter"](around:{radius_m},{lat},{lon});
+      nwr["military"="bunker"](around:{radius_m},{lat},{lon});
+      nwr["building"="bunker"](around:{radius_m},{lat},{lon});
+      nwr["bunker_type"="bomb_shelter"](around:{radius_m},{lat},{lon});
+    );
+    out center body;
+    """
+
+    try:
+        r = requests.post(OVERPASS_URL, data={"data": query}, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.warning("Overpass API error: %s", e)
+        return []
+
+    shelters = []
+    for el in data.get("elements", []):
+        # Для way/relation берём center, для node — lat/lon напрямую
+        slat = el.get("lat") or (el.get("center", {}).get("lat"))
+        slon = el.get("lon") or (el.get("center", {}).get("lon"))
+        if not slat or not slon:
+            continue
+
+        tags = el.get("tags", {})
+        name = tags.get("name", "").strip()
+        addr = tags.get("addr:street", "")
+        house = tags.get("addr:housenumber", "")
+        if addr and house:
+            addr = f"{addr} {house}"
+        elif not addr:
+            addr = tags.get("addr:full", "") or name
+
+        # Определяем тип
+        raw_type = (tags.get("shelter_type", "") or
+                    tags.get("bunker_type", "") or
+                    tags.get("building", "") or "bomb_shelter")
+
+        shelters.append({
+            "id":       f"osm:{el['type']}:{el['id']}",
+            "lat":      slat,
+            "lon":      slon,
+            "address":  addr.strip() or tags.get("description", "") or "מקלט",
+            "name":     name,
+            "type_raw": raw_type,
+            "hours":    tags.get("opening_hours", "").strip(),
+            "phone":    tags.get("phone", "").strip(),
+            "notes":    tags.get("note", "").strip() or tags.get("description", "").strip(),
+            "distance": round(haversine(lat, lon, slat, slon)),
+            "source":   "osm",
+        })
+
+    shelters.sort(key=lambda x: x["distance"])
+    return shelters
+
+
+# ── ARCGIS ТЕЛЬ-АВИВА — ДОПОЛНИТЕЛЬНЫЙ ИСТОЧНИК ──────────────────────────────
+
+def parse_shelter_arcgis(feat, ulat, ulon):
     g = feat.get("geometry", {}); a = feat.get("attributes", {})
     slat = g.get("y") or a.get("lat")
     slon = g.get("x") or a.get("lon")
     addr = (a.get("Full_Address") or "").strip()
     if not addr:
-        addr = f"{(a.get('shem_recho') or '').strip()} {str(a.get('ms_bait') or '').strip()}".strip() or "адрес не указан"
+        addr = f"{(a.get('shem_recho') or '').strip()} {str(a.get('ms_bait') or '').strip()}".strip() or "כתובת לא ידועה"
     return {
-        "id":       a.get("UniqueId") or str(a.get("oid_mitkan", "")),
+        "id":       f"ta:{a.get('UniqueId') or str(a.get('oid_mitkan', ''))}",
         "lat": slat, "lon": slon,
         "address":  addr,
         "name":     (a.get("shem") or "").strip(),
-        "type":     shelter_type_ru(a.get("t_sug", "")),
+        "type_raw": a.get("t_sug", ""),
         "hours":    (a.get("opening_times") or "").strip(),
         "phone":    (a.get("telephone_henion") or a.get("celolar") or "").strip(),
         "notes":    (a.get("hearot") or "").strip(),
         "distance": round(haversine(ulat, ulon, slat, slon)),
+        "source":   "ta",
     }
 
 
-def fetch_shelters(lat, lon):
-    # Попытка 1: spatial query
+def fetch_shelters_arcgis(lat, lon):
+    """Оригинальный запрос к ArcGIS Тель-Авива."""
     params = {
         "where": "1=1", "geometry": f"{lon},{lat}",
         "geometryType": "esriGeometryPoint", "inSR": "4326",
@@ -187,31 +450,73 @@ def fetch_shelters(lat, lon):
         "outFields": "*", "outSR": "4326", "returnGeometry": "true",
         "f": "json", "resultRecordCount": 100,
     }
-    r = requests.get(ARCGIS_URL, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    if "error" in data: raise RuntimeError(data["error"])
-    features = data.get("features", [])
+    try:
+        r = requests.get(ARCGIS_URL, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if "error" in data:
+            raise RuntimeError(data["error"])
+        features = data.get("features", [])
 
-    # Fallback: если spatial вернул 0 — берём всё и фильтруем вручную
-    if not features:
-        logger.warning("Spatial query вернул 0, пробуем fallback")
-        params2 = {
-            "where": "1=1", "outFields": "*", "outSR": "4326",
-            "returnGeometry": "true", "f": "json", "resultRecordCount": 500,
-        }
-        r2 = requests.get(ARCGIS_URL, params=params2, timeout=15)
-        r2.raise_for_status()
-        data2 = r2.json()
-        features = [
-            f for f in data2.get("features", [])
-            if f.get("geometry") and
-               haversine(lat, lon, f["geometry"].get("y", 0), f["geometry"].get("x", 0)) <= SEARCH_RADIUS_M
-        ]
+        # Fallback: если spatial вернул 0
+        if not features:
+            params2 = {
+                "where": "1=1", "outFields": "*", "outSR": "4326",
+                "returnGeometry": "true", "f": "json", "resultRecordCount": 500,
+            }
+            r2 = requests.get(ARCGIS_URL, params=params2, timeout=15)
+            r2.raise_for_status()
+            data2 = r2.json()
+            features = [
+                f for f in data2.get("features", [])
+                if f.get("geometry") and
+                   haversine(lat, lon, f["geometry"].get("y", 0), f["geometry"].get("x", 0)) <= SEARCH_RADIUS_M
+            ]
 
-    shelters = [parse_shelter(f, lat, lon) for f in features if f.get("geometry")]
-    shelters.sort(key=lambda x: x["distance"])
-    return shelters[:MAX_RESULTS]
+        return [parse_shelter_arcgis(f, lat, lon) for f in features if f.get("geometry")]
+    except Exception as e:
+        logger.warning("ArcGIS error: %s", e)
+        return []
+
+
+# ── ОБЪЕДИНЁННЫЙ ПОИСК ────────────────────────────────────────────────────────
+
+def deduplicate_shelters(shelters, threshold_m=50):
+    """Убираем дубли — если два убежища ближе threshold_m друг к другу, берём с меньшим distance."""
+    result = []
+    for s in shelters:
+        is_dup = False
+        for existing in result:
+            if haversine(s["lat"], s["lon"], existing["lat"], existing["lon"]) < threshold_m:
+                # Оставляем тот, у которого больше информации или ТА (богаче)
+                if s["source"] == "ta" and existing["source"] == "osm":
+                    result.remove(existing)
+                    result.append(s)
+                is_dup = True
+                break
+        if not is_dup:
+            result.append(s)
+    return result
+
+
+def fetch_shelters(lat, lon):
+    """Главная функция поиска: OSM + ArcGIS (для ТА), дедупликация, топ-N."""
+    # Всегда ищем в OSM
+    shelters_osm = fetch_shelters_osm(lat, lon)
+    logger.info("OSM: found %d shelters", len(shelters_osm))
+
+    # Если в районе Тель-Авива — добавляем ArcGIS
+    shelters_ta = []
+    if is_in_tel_aviv(lat, lon):
+        shelters_ta = fetch_shelters_arcgis(lat, lon)
+        logger.info("ArcGIS TA: found %d shelters", len(shelters_ta))
+
+    # Объединяем и дедуплицируем
+    all_shelters = shelters_ta + shelters_osm  # TA первые — приоритет при дедупликации
+    all_shelters = deduplicate_shelters(all_shelters)
+    all_shelters.sort(key=lambda x: x["distance"])
+
+    return all_shelters[:MAX_RESULTS]
 
 
 # ─── КАРТА ────────────────────────────────────────────────────────────────────
@@ -219,17 +524,14 @@ def fetch_shelters(lat, lon):
 def generate_map(user_lat, user_lon, shelters) -> BytesIO:
     from PIL import ImageDraw, ImageFont
     m = StaticMap(900, 700, url_template="https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png")
-    # Убежища — красные
     for s in shelters:
         m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 30))
         m.add_marker(CircleMarker((s["lon"], s["lat"]), "white", 18))
-    # Юзер — синий поверх
     m.add_marker(CircleMarker((user_lon, user_lat), "#2471A3", 22))
     m.add_marker(CircleMarker((user_lon, user_lat), "white", 12))
     image = m.render()
     w, h = image.size
 
-    # Пересчёт координат в пиксели
     def to_px(lon, lat):
         import math
         n = 2 ** m.zoom
@@ -244,7 +546,6 @@ def generate_map(user_lat, user_lon, shelters) -> BytesIO:
     except:
         font = ImageFont.load_default()
 
-    # Номера над маркерами убежищ
     for i, s in enumerate(shelters, 1):
         px, py = to_px(s["lon"], s["lat"])
         draw.ellipse([px-14, py-38, px+14, py-10], fill="white", outline="#C0392B", width=2)
@@ -261,10 +562,42 @@ def generate_map(user_lat, user_lon, shelters) -> BytesIO:
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # Загружаем язык пользователя из БД
+    try:
+        lang = await load_user_lang(update.effective_user.id)
+        ctx.user_data["lang"] = lang
+    except:
+        ctx.user_data.setdefault("lang", "ru")
+
     await update.message.reply_text(
-        "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища на карте.",
+        t(ctx, "welcome"),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=LOCATION_KB,
+        reply_markup=get_location_kb(ctx),
+    )
+
+
+async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Выбор языка."""
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang:ru")],
+        [InlineKeyboardButton("🇮🇱 עברית", callback_data="lang:he")],
+        [InlineKeyboardButton("🇬🇧 English", callback_data="lang:en")],
+    ])
+    await update.message.reply_text(t(ctx, "choose_lang"), reply_markup=kb)
+
+
+async def cb_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    lang = query.data.split(":")[1]
+    ctx.user_data["lang"] = lang
+    try:
+        await save_user_lang(query.from_user.id, lang)
+    except:
+        pass
+    await query.message.reply_text(
+        t(ctx, "lang_set"),
+        reply_markup=get_location_kb(ctx),
     )
 
 
@@ -273,45 +606,61 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lon = update.message.location.longitude
     logger.info("Location: %s %s", lat, lon)
 
+    # Загружаем язык если ещё не загружен
+    if "lang" not in ctx.user_data:
+        try:
+            ctx.user_data["lang"] = await load_user_lang(update.effective_user.id)
+        except:
+            ctx.user_data["lang"] = "ru"
+
+    lang = ctx.user_data.get("lang", "ru")
+
     # Ищем убежища
     try:
         shelters = fetch_shelters(lat, lon)
     except Exception as e:
-        logger.error("GIS error: %s", e, exc_info=True)
-        await update.message.reply_text(f"❌ Ошибка при поиске: {e}")
+        logger.error("Search error: %s", e, exc_info=True)
+        await update.message.reply_text(t(ctx, "search_error", err=e))
         return
 
     if not shelters:
         await update.message.reply_text(
-            f"😔 Убежищ в радиусе {SEARCH_RADIUS_M} м не найдено.\n"
-            f"Координаты: {lat:.5f}, {lon:.5f}",
+            t(ctx, "no_shelters", radius=SEARCH_RADIUS_M, lat=lat, lon=lon),
         )
         return
+
+    # Добавляем тип на нужном языке
+    for s in shelters:
+        s["type"] = shelter_type_label(s["type_raw"], lang)
 
     ctx.user_data["shelters"] = shelters
     ctx.user_data["user_lat"] = lat
     ctx.user_data["user_lon"] = lon
 
-    # Кнопки выбора — под картой или под текстом
+    dist_unit = t(ctx, "distance")
+
+    # Кнопки выбора
     buttons = []
     for i, s in enumerate(shelters, 1):
         waze_url = f"https://waze.com/ul?ll={s['lat']},{s['lon']}&navigate=yes"
         gmaps_url = f"https://maps.google.com/maps?daddr={s['lat']},{s['lon']}"
+        label = s['address'][:28] if s['address'] else s['name'][:28]
         buttons.append([
-            InlineKeyboardButton(f"#{i} {s['address'][:28]}", callback_data=f"select:{i-1}"),
+            InlineKeyboardButton(f"#{i} {label}", callback_data=f"select:{i-1}"),
         ])
         buttons.append([
-            InlineKeyboardButton("🚗 Waze",         url=waze_url),
-            InlineKeyboardButton("🗺️ Google Maps",  url=gmaps_url),
+            InlineKeyboardButton("🚗 Waze", url=waze_url),
+            InlineKeyboardButton("🗺️ Google Maps", url=gmaps_url),
         ])
     kb = InlineKeyboardMarkup(buttons)
 
-    # Карта + кнопки в одном сообщении
+    # Карта + кнопки
     try:
         map_buf = generate_map(lat, lon, shelters)
-        caption_lines = ["🔵 ты   🔴 убежища\n"]
+        caption_lines = [t(ctx, "map_legend") + "\n"]
         for i, s in enumerate(shelters, 1):
-            caption_lines.append(f"#{i} {s['address']} — {s['distance']} м")
+            src = "🟢" if s["source"] == "ta" else "🌐"
+            caption_lines.append(f"#{i} {s['address']} — {s['distance']} {dist_unit} {src}")
         await update.message.reply_photo(
             photo=map_buf,
             caption="\n".join(caption_lines),
@@ -319,11 +668,10 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.error("Map error: %s", e, exc_info=True)
-        await update.message.reply_text(f"⚠️ Карта не загрузилась: {e}")
-        # Если карта не вышла — текстовый список с теми же кнопками
-        lines = [f"*Найдено {len(shelters)} убежищ:*\n"]
+        await update.message.reply_text(t(ctx, "map_error", err=e))
+        lines = [t(ctx, "found", count=len(shelters))]
         for i, s in enumerate(shelters, 1):
-            line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} м_"
+            line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} {dist_unit}_"
             if s["hours"]: line += f"\n🕐 {s['hours']}"
             if s["phone"]: line += f"\n📞 {s['phone']}"
             lines.append(line)
@@ -342,17 +690,19 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     shelters = ctx.user_data.get("shelters", [])
     if not shelters or idx >= len(shelters):
-        await query.message.reply_text("Отправь геолокацию заново 📍")
+        await query.message.reply_text("📍", reply_markup=get_location_kb(ctx))
         return
 
     s = shelters[idx]
+    lang = ctx.user_data.get("lang", "ru")
     user_id = query.from_user.id
+    dist_unit = t(ctx, "distance")
 
     # Кто уже идёт
     buddies = await get_buddies(s["id"], user_id)
     reviews = await get_reviews(s["id"], limit=3)
 
-    lines = [f"*{s['type']}*", f"📍 {s['address']}", f"📏 {s['distance']} м от тебя"]
+    lines = [f"*{s['type']}*", f"📍 {s['address']}", f"📏 {s['distance']} {dist_unit}"]
     if s["hours"]: lines.append(f"🕐 {s['hours']}")
     if s["phone"]: lines.append(f"📞 {s['phone']}")
     if s["notes"]:
@@ -361,30 +711,28 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines.append("")
     if buddies:
-        # Кликабельные имена через tg://user?id=...
         def buddy_link(b):
-            name = b["first_name"] or b["username"] or "Аноним"
+            name = b["first_name"] or b["username"] or "?"
             return f"[{name}](tg://user?id={b['user_id']})"
         names = [buddy_link(b) for b in buddies]
-        lines.append(f"🤝 *Идут сюда ({len(buddies)}):*")
+        lines.append(t(ctx, "going_header", count=len(buddies)))
         lines.append("  ".join(names))
     else:
-        lines.append("🤝 *Пока никто не отметился*")
+        lines.append(t(ctx, "nobody_going"))
 
     if reviews:
         lines.append("")
-        lines.append(f"💬 *Отзывы:*")
+        lines.append(t(ctx, "reviews_hdr"))
         for r in reviews:
-            txt = (r["text"] or "_(только фото)_")[:80]
-            lines.append(f"• *{r['username'] or 'Аноним'}:* {txt}")
+            txt = (r["text"] or "📷")[:80]
+            lines.append(f"• *{r['username'] or '?'}:* {txt}")
 
-    # Отправляем текст
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🤝 Иду сюда", callback_data=f"checkin:{s['id']}:{idx}"),
-            InlineKeyboardButton("✍️ Оставить отзыв", callback_data=f"review:{s['id']}:{s['address'][:30]}"),
+            InlineKeyboardButton(t(ctx, "btn_going"), callback_data=f"checkin:{s['id']}:{idx}"),
+            InlineKeyboardButton(t(ctx, "btn_review"), callback_data=f"review:{s['id']}:{s['address'][:30]}"),
         ],
-        [InlineKeyboardButton("← Назад к списку", callback_data="back")],
+        [InlineKeyboardButton(t(ctx, "btn_back"), callback_data="back")],
     ])
 
     await query.message.reply_text(
@@ -402,7 +750,7 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 photos = await ctx.bot.get_user_profile_photos(b["user_id"], limit=1)
                 if photos.total_count > 0:
                     file_id = photos.photos[0][-1].file_id
-                    name = b["first_name"] or b["username"] or "Аноним"
+                    name = b["first_name"] or b["username"] or "?"
                     media.append(InputMediaPhoto(media=file_id, caption=name))
             except Exception:
                 pass
@@ -415,11 +763,15 @@ async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     shelters = ctx.user_data.get("shelters", [])
     if not shelters:
-        await query.message.reply_text("Отправь геолокацию заново 📍", reply_markup=LOCATION_KB)
+        await query.message.reply_text("📍", reply_markup=get_location_kb(ctx))
         return
-    lines = ["*Выбери убежище:*\n"]
+
+    lang = ctx.user_data.get("lang", "ru")
+    dist_unit = t(ctx, "distance")
+
+    lines = [t(ctx, "choose")]
     for i, s in enumerate(shelters, 1):
-        line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} м_"
+        line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} {dist_unit}_"
         lines.append(line)
     buttons = [[InlineKeyboardButton(f"#{i} — {s['address'][:35]}", callback_data=f"select:{i-1}")]
                for i, s in enumerate(shelters, 1)]
@@ -434,7 +786,7 @@ async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cb_checkin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("✅ Отмечаю!")
+    await query.answer("✅")
     _, shelter_id, idx = query.data.split(":", 2)
     shelters = ctx.user_data.get("shelters", [])
     shelter  = next((s for s in shelters if s["id"] == shelter_id), None)
@@ -445,17 +797,17 @@ async def cb_checkin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     buddies = await get_buddies(shelter_id, user.id)
     if buddies:
-        names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
-        buddy_text = f"👥 Ещё здесь: {', '.join(names)}"
+        names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "?") for b in buddies]
+        buddy_text = t(ctx, "buddies_here", names=", ".join(names))
     else:
-        buddy_text = "😶 Ты пока первый здесь."
+        buddy_text = t(ctx, "nobody_here")
 
+    name = shelter['name'] or shelter['address']
     await query.message.reply_text(
-        f"✅ Отмечен в *{shelter['name'] or shelter['address']}*\n"
-        f"Чекин активен {CHECKIN_TTL_H} часа.\n\n{buddy_text}",
+        t(ctx, "checkin_done", name=name, ttl=CHECKIN_TTL_H) + f"\n\n{buddy_text}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🚪 Покинуть убежище", callback_data="checkout")
+            InlineKeyboardButton(t(ctx, "btn_leave"), callback_data="checkout")
         ]]),
     )
 
@@ -464,22 +816,28 @@ async def cb_checkout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     await do_checkout(query.from_user.id)
-    await query.message.reply_text("🚪 Ты покинул убежище.", reply_markup=LOCATION_KB)
+    await query.message.reply_text(t(ctx, "checkout_done"), reply_markup=get_location_kb(ctx))
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if "lang" not in ctx.user_data:
+        try:
+            ctx.user_data["lang"] = await load_user_lang(update.effective_user.id)
+        except:
+            ctx.user_data["lang"] = "ru"
+
     ci = await get_my_checkin(update.effective_user.id)
     if not ci:
-        await update.message.reply_text("Ты не отмечен ни в одном убежище.", reply_markup=LOCATION_KB)
+        await update.message.reply_text(t(ctx, "not_checked"), reply_markup=get_location_kb(ctx))
         return
     buddies = await get_buddies(ci["shelter_id"], update.effective_user.id)
-    names   = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
+    names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "?") for b in buddies]
     await update.message.reply_text(
-        f"📍 Ты в *{ci['shelter_name'] or ci['shelter_addr']}*\n"
-        f"👥 Рядом: {', '.join(names) if names else 'никого'}",
+        f"📍 *{ci['shelter_name'] or ci['shelter_addr']}*\n"
+        f"👥 {', '.join(names) if names else '—'}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🚪 Покинуть убежище", callback_data="checkout")
+            InlineKeyboardButton(t(ctx, "btn_leave"), callback_data="checkout")
         ]]),
     )
 
@@ -493,7 +851,7 @@ async def cb_review_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["rv_id"]   = shelter_id
     ctx.user_data["rv_addr"] = shelter_addr
     await query.message.reply_text(
-        f"✍️ Отзыв для *{shelter_addr}*\n\nНапиши текст (или /skip → сразу к фото):",
+        t(ctx, "review_ask", addr=shelter_addr),
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -502,7 +860,7 @@ async def cb_review_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def review_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["rv_text"] = update.message.text if update.message.text != "/skip" else None
-    await update.message.reply_text("📷 Фото убежища (или /skip):")
+    await update.message.reply_text(t(ctx, "review_photo"))
     return REVIEW_PHOTO
 
 
@@ -511,59 +869,74 @@ async def review_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.message.photo:
         photo_id = update.message.photo[-1].file_id
     elif not (update.message.text and "/skip" in update.message.text):
-        await update.message.reply_text("Фото или /skip:")
+        await update.message.reply_text(t(ctx, "photo_or_skip"))
         return REVIEW_PHOTO
     user = update.effective_user
     await save_review(ctx.user_data["rv_id"], ctx.user_data["rv_addr"],
                       user.id, user.username or user.first_name,
                       ctx.user_data.get("rv_text"), photo_id)
-    await update.message.reply_text("✅ Отзыв сохранён, спасибо!", reply_markup=LOCATION_KB)
+    await update.message.reply_text(t(ctx, "review_saved"), reply_markup=get_location_kb(ctx))
     return ConversationHandler.END
 
 
 async def review_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отменено.", reply_markup=LOCATION_KB)
+    await update.message.reply_text(t(ctx, "review_cancel"), reply_markup=get_location_kb(ctx))
     return ConversationHandler.END
 
 
 # ── ДИАГНОСТИКА ───────────────────────────────────────────────────────────────
 
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Бот живой!")
+    await update.message.reply_text("✅ Bot alive!")
+    # DB check
     try:
         pool = await get_pool()
         async with pool.acquire() as c:
             await c.fetchval("SELECT 1")
-        await update.message.reply_text("✅ База подключена")
+        await update.message.reply_text("✅ DB connected")
     except Exception as e:
-        await update.message.reply_text(f"❌ База: {e}")
+        await update.message.reply_text(f"❌ DB: {e}")
+    # ArcGIS check
     try:
         r = requests.get(ARCGIS_URL,
             params={"where":"1=1","outFields":"OBJECTID","f":"json","resultRecordCount":1},
             timeout=10)
         cnt = len(r.json().get("features", []))
-        await update.message.reply_text(f"✅ GIS API работает (features: {cnt})")
+        await update.message.reply_text(f"✅ TA GIS API (features: {cnt})")
     except Exception as e:
-        await update.message.reply_text(f"❌ GIS API: {e}")
+        await update.message.reply_text(f"❌ TA GIS: {e}")
+    # Overpass check
+    try:
+        r = requests.post(OVERPASS_URL, data={"data": '[out:json][timeout:5];node["amenity"="shelter"](32.08,34.77,32.09,34.78);out count;'}, timeout=10)
+        data = r.json()
+        total = data.get("elements", [{}])[0].get("tags", {}).get("total", "?")
+        await update.message.reply_text(f"✅ Overpass API (sample count: {total})")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Overpass: {e}")
 
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    logger.error("Ошибка: %s", ctx.error, exc_info=ctx.error)
+    logger.error("Error: %s", ctx.error, exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_message:
-        await update.effective_message.reply_text(f"❌ Ошибка: {ctx.error}")
+        await update.effective_message.reply_text(f"❌ {ctx.error}")
 
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📍 Нажми кнопку внизу:", reply_markup=LOCATION_KB)
+    if "lang" not in ctx.user_data:
+        try:
+            ctx.user_data["lang"] = await load_user_lang(update.effective_user.id)
+        except:
+            ctx.user_data["lang"] = "ru"
+    await update.message.reply_text(t(ctx, "send_loc_btn"), reply_markup=get_location_kb(ctx))
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
     if BOT_TOKEN == "YOUR_TOKEN_HERE":
-        print("❌ Установи BOT_TOKEN"); return
+        print("❌ Set BOT_TOKEN"); return
     if not DATABASE_URL:
-        print("❌ Установи DATABASE_URL"); return
+        print("❌ Set DATABASE_URL"); return
 
     import asyncio
     try:
@@ -586,16 +959,18 @@ def main():
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("ping",   cmd_ping))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("lang",   cmd_lang))
     app.add_handler(review_conv)
+    app.add_handler(CallbackQueryHandler(cb_lang,           pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(cb_select_shelter, pattern=r"^select:"))
-    app.add_handler(CallbackQueryHandler(cb_back,     pattern=r"^back$"))
-    app.add_handler(CallbackQueryHandler(cb_checkin,  pattern=r"^checkin:"))
-    app.add_handler(CallbackQueryHandler(cb_checkout, pattern=r"^checkout$"))
+    app.add_handler(CallbackQueryHandler(cb_back,           pattern=r"^back$"))
+    app.add_handler(CallbackQueryHandler(cb_checkin,        pattern=r"^checkin:"))
+    app.add_handler(CallbackQueryHandler(cb_checkout,       pattern=r"^checkout$"))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(global_error_handler)
 
-    print("🚀 ялла, миклат! запущен.")
+    print("🚀 ялла, миклат! (nationwide) запущен.")
     app.run_polling(drop_pending_updates=True)
 
 
