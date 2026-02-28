@@ -15,7 +15,7 @@ BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
 MAX_RESULTS     = 5
-SEARCH_RADIUS_M = 1000
+SEARCH_RADIUS_M = 2000
 CHECKIN_TTL_H   = 2
 
 REVIEW_TEXT, REVIEW_PHOTO = range(2)
@@ -233,6 +233,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lat, lon = update.message.location.latitude, update.message.location.longitude
+    logger.info("Location received: lat=%s lon=%s", lat, lon)
     msg = await update.message.reply_text("🔍 Ищу...")
 
     try:
@@ -243,7 +244,11 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not shelters:
-        await msg.edit_text(f"😔 Убежищ в радиусе {SEARCH_RADIUS_M} м не найдено.")
+        await msg.edit_text(
+            f"😔 Убежищ в радиусе {SEARCH_RADIUS_M} м не найдено.\n"
+            f"📍 Координаты: {lat:.5f}, {lon:.5f}\n\n"
+            "Попробуй отправить геолокацию ещё раз.",
+        )
         return
 
     ctx.user_data["shelters"] = shelters
@@ -391,13 +396,27 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Диагностика — проверяем бот и базу."""
     await update.message.reply_text("✅ Бот живой!")
+    # Проверка базы
     try:
         pool = await get_pool()
         async with pool.acquire() as c:
             result = await c.fetchval("SELECT 1")
-        await update.message.reply_text(f"✅ База подключена (SELECT 1 = {result})")
+        await update.message.reply_text(f"✅ База подключена")
     except Exception as e:
-        await update.message.reply_text(f"❌ База НЕ подключена: {e}")
+        await update.message.reply_text(f"❌ База: {e}")
+    # Проверка GIS API
+    try:
+        import requests as req
+        r = req.get(
+            "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query",
+            params={"where":"1=1","outFields":"OBJECTID","f":"json","resultRecordCount":1},
+            timeout=10
+        )
+        data = r.json()
+        cnt = len(data.get("features", []))
+        await update.message.reply_text(f"✅ GIS API доступен (features: {cnt})")
+    except Exception as e:
+        await update.message.reply_text(f"❌ GIS API недоступен: {e}")
 
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
