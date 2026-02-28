@@ -176,20 +176,28 @@ def generate_map(user_lat, user_lon, shelters) -> BytesIO:
 
 # ─── MESSAGE BUILDERS ─────────────────────────────────────────────────────────
 
-def build_list_message(shelters):
-    """Список убежищ — главный экран."""
+def build_list_message(shelters, buddies_by_shelter=None):
+    """Список убежищ с кнопками действий для каждого."""
+    if buddies_by_shelter is None:
+        buddies_by_shelter = {}
     lines = ["🛡️ *Ближайшие убежища:*\n"]
     for i, s in enumerate(shelters, 1):
-        lines.append(f"*{i}.* {s['type']} — {s['address']} _{s['distance']} м_")
-    lines.append("\n_Нажми на убежище чтобы узнать подробности_")
-    text = "\n".join(lines)
+        buddies = buddies_by_shelter.get(s["id"], [])
+        who = ""
+        if buddies:
+            names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
+            who = f"  👥 {', '.join(names)}"
+        lines.append(f"*{i}.* {s['type']}\n   📍 {s['address']} — {s['distance']} м{who}")
+    text = "\n\n".join(lines)
 
-    buttons = [[InlineKeyboardButton(f"#{i} {s['name'] or s['address'][:20]}", callback_data=f"shelter:{i-1}")]
-               for i, s in enumerate(shelters, 1)]
-    buttons.append([
-        InlineKeyboardButton("📍 Все на карте", callback_data="mapall"),
-        InlineKeyboardButton("🗺️ ГИС карта", url="https://gisn.tel-aviv.gov.il/iview2js4/index.aspx?zoom=14000&layers=592&back=0&year=2025"),
-    ])
+    buttons = []
+    for i, s in enumerate(shelters, 1):
+        buddies = buddies_by_shelter.get(s["id"], [])
+        buddy_label = f" ({len(buddies)})" if buddies else ""
+        buttons.append([
+            InlineKeyboardButton(f"🤝 Иду в #{i}{buddy_label}", callback_data=f"checkin:{s['id']}:{i}"),
+            InlineKeyboardButton(f"✍️ Отзыв #{i}", callback_data=f"review:{s['id']}:{s['address'][:30]}"),
+        ])
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -278,6 +286,11 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data["shelters"] = shelters
 
+    # Загружаем кто уже идёт в каждое убежище
+    buddies_by_shelter = {}
+    for s in shelters:
+        buddies_by_shelter[s["id"]] = await get_buddies(s["id"], update.effective_user.id)
+
     # Генерируем карту
     try:
         map_buf = generate_map(lat, lon, shelters)
@@ -285,16 +298,12 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"🔴 #{i+1} {s['type']} — {s['address']} ({s['distance']} м)"
             for i, s in enumerate(shelters)
         ) + "\n\n🔵 — ты  |  🔴 — убежища"
-        text, kb = build_list_message(shelters)
-        await update.message.reply_photo(
-            photo=map_buf,
-            caption=caption,
-        )
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        await update.message.reply_photo(photo=map_buf, caption=caption)
     except Exception as e:
         logger.error("Map generation error: %s", e)
-        text, kb = build_list_message(shelters)
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    text, kb = build_list_message(shelters, buddies_by_shelter)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 
 async def cb_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
