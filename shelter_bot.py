@@ -360,8 +360,11 @@ def shelter_type_label(raw_type, lang="ru"):
 
 # ── GOVMAP — ГОСУДАРСТВЕННЫЙ ГЕОПОРТАЛ (ВСЯ СТРАНА) ──────────────────────────
 
-def reverse_geocode_city(lat, lon):
-    """Получаем название города на иврите через Nominatim."""
+def reverse_geocode_names(lat, lon):
+    """Получаем список возможных названий населённого пункта на иврите.
+    Возвращает list[str] — кандидаты для поиска в GovMap.
+    """
+    names = []
     try:
         r = requests.get(NOMINATIM_URL, params={
             "lat": lat, "lon": lon, "format": "json",
@@ -369,13 +372,56 @@ def reverse_geocode_city(lat, lon):
         }, headers={"User-Agent": "YallaMiklat/1.0"}, timeout=5)
         r.raise_for_status()
         addr = r.json().get("address", {})
-        # Пробуем city → town → village → municipality
-        return (addr.get("city") or addr.get("town") or
-                addr.get("village") or addr.get("municipality") or
-                addr.get("county") or "")
+
+        # Собираем все подходящие названия (кроме мо'ацот)
+        for key in ("city", "town", "village", "suburb", "neighbourhood",
+                     "hamlet", "municipality"):
+            v = (addr.get(key) or "").strip()
+            if v and v not in names and not v.startswith("מועצה"):
+                names.append(v)
+
+        # Если Nominatim вернул только мо'ацу — ищем имя поселения через Overpass
+        is_regional = all(
+            (addr.get(k, "").startswith("מועצה") or not addr.get(k))
+            for k in ("city", "town")
+        )
+        if is_regional and not names:
+            osm_names = _settlement_names_osm(lat, lon)
+            for n in osm_names:
+                if n not in names:
+                    names.append(n)
+
     except Exception as e:
         logger.warning("Nominatim error: %s", e)
-        return ""
+
+    return names
+
+
+def _settlement_names_osm(lat, lon, radius=3000):
+    """Fallback: находим имя ближайшего поселения через Overpass (place=*).
+    Для кибуцев/мошавов где Nominatim возвращает только «мо'ацу эзорит».
+    """
+    query = (
+        f'[out:json][timeout:5];'
+        f'(node["place"~"village|town|city|hamlet|kibbutz|moshav|neighbourhood"]'
+        f'(around:{radius},{lat},{lon}););out body;'
+    )
+    try:
+        r = requests.post(OVERPASS_URL, data={"data": query}, timeout=8)
+        r.raise_for_status()
+        elements = r.json().get("elements", [])
+    except Exception:
+        return []
+
+    places = []
+    for el in elements:
+        name_he = el.get("tags", {}).get("name", "")
+        if name_he:
+            d = haversine(lat, lon, el["lat"], el["lon"])
+            places.append((name_he, d))
+    places.sort(key=lambda x: x[1])
+    # Возвращаем до 3 ближайших
+    return [n for n, _ in places[:3]]
 
 
 def fetch_shelters_govmap(lat, lon, radius_m=None):
@@ -386,65 +432,70 @@ def fetch_shelters_govmap(lat, lon, radius_m=None):
     if radius_m is None:
         radius_m = SEARCH_RADIUS_M
 
-    city = reverse_geocode_city(lat, lon)
-    if not city:
-        logger.warning("GovMap: не удалось определить город")
+    place_names = reverse_geocode_names(lat, lon)
+    if not place_names:
+        logger.warning("GovMap: не удалось определить населённый пункт")
         return []
 
-    logger.info("GovMap: город = %s", city)
+    logger.info("GovMap: кандидаты = %s", place_names)
 
     shelters = []
-    # Ищем двумя запросами для максимального покрытия
-    for query_text in [f"מקלט {city}", f"מקלט ציבורי {city}"]:
-        try:
-            r = requests.post(GOVMAP_SEARCH_URL,
-                json={"keyword": query_text, "type": "all"},
-                headers={"Content-Type": "application/json"},
-                timeout=10)
-            r.raise_for_status()
-            results = r.json().get("data", {}).get("Result", [])
-        except Exception as e:
-            logger.warning("GovMap search error (%s): %s", query_text, e)
-            continue
-
-        for item in results:
-            itm_x = item.get("X")
-            itm_y = item.get("Y")
-            if not itm_x or not itm_y:
+    # Ищем по всем кандидатам имён, двумя вариантами запроса каждый
+    seen_queries = set()
+    for city in place_names:
+        for query_text in [f"מקלט {city}", f"מקלט ציבורי {city}"]:
+            if query_text in seen_queries:
+                continue
+            seen_queries.add(query_text)
+            try:
+                r = requests.post(GOVMAP_SEARCH_URL,
+                    json={"keyword": query_text, "type": "all"},
+                    headers={"Content-Type": "application/json"},
+                    timeout=10)
+                r.raise_for_status()
+                results = (r.json().get("data") or {}).get("Result", [])
+            except Exception as e:
+                logger.warning("GovMap search error (%s): %s", query_text, e)
                 continue
 
-            slat, slon = itm_to_wgs84(itm_x, itm_y)
-            if slat is None:
-                continue
+            for item in results:
+                itm_x = item.get("X")
+                itm_y = item.get("Y")
+                if not itm_x or not itm_y:
+                    continue
 
-            dist = haversine(lat, lon, slat, slon)
-            if dist > radius_m:
-                continue
+                slat, slon = itm_to_wgs84(itm_x, itm_y)
+                if slat is None:
+                    continue
 
-            label = item.get("ResultLable", "")
-            # "מקלט ציבורי | בת ים" → split
-            parts = label.split("|")
-            name = parts[0].strip() if parts else "מקלט"
-            loc = parts[1].strip() if len(parts) > 1 else city
+                dist = haversine(lat, lon, slat, slon)
+                if dist > radius_m:
+                    continue
 
-            shelter_id = f"gov:{item.get('ObjectID', '')}"
-            # Дедупликация внутри GovMap по ID
-            if any(s["id"] == shelter_id for s in shelters):
-                continue
+                label = item.get("ResultLable", "")
+                # "מקלט ציבורי | בת ים" → split
+                parts = label.split("|")
+                name = parts[0].strip() if parts else "מקלט"
+                loc = parts[1].strip() if len(parts) > 1 else city
 
-            shelters.append({
-                "id":       shelter_id,
-                "lat":      slat,
-                "lon":      slon,
-                "address":  f"{name}, {loc}",
-                "name":     name,
-                "type_raw": "bomb_shelter",
-                "hours":    "",
-                "phone":    "",
-                "notes":    "",
-                "distance": round(dist),
-                "source":   "gov",
-            })
+                shelter_id = f"gov:{item.get('ObjectID', '')}"
+                # Дедупликация внутри GovMap по ID
+                if any(s["id"] == shelter_id for s in shelters):
+                    continue
+
+                shelters.append({
+                    "id":       shelter_id,
+                    "lat":      slat,
+                    "lon":      slon,
+                    "address":  f"{name}, {loc}",
+                    "name":     name,
+                    "type_raw": "bomb_shelter",
+                    "hours":    "",
+                    "phone":    "",
+                    "notes":    "",
+                    "distance": round(dist),
+                    "source":   "gov",
+                })
 
     shelters.sort(key=lambda x: x["distance"])
     return shelters
@@ -613,14 +664,18 @@ def deduplicate_shelters(shelters, threshold_m=50):
 
 
 def fetch_shelters(lat, lon):
-    """Главная функция поиска: GovMap + OSM + ArcGIS (для ТА), дедупликация, топ-N."""
-    # GovMap — государственный геопортал (основной)
-    shelters_gov = fetch_shelters_govmap(lat, lon)
+    """Главная функция поиска: GovMap + OSM + ArcGIS (для ТА), дедупликация, топ-N.
+    Если результатов мало — автоматически расширяем радиус OSM.
+    """
+    base_radius = SEARCH_RADIUS_M  # 2000m
+
+    # GovMap — государственный геопортал (основной, ищем в широком радиусе)
+    shelters_gov = fetch_shelters_govmap(lat, lon, radius_m=base_radius + 1000)
     logger.info("GovMap: found %d shelters", len(shelters_gov))
 
-    # OSM Overpass — дополнительный
-    shelters_osm = fetch_shelters_osm(lat, lon)
-    logger.info("OSM: found %d shelters", len(shelters_osm))
+    # OSM Overpass — дополнительный (стартуем с базового радиуса)
+    shelters_osm = fetch_shelters_osm(lat, lon, radius_m=base_radius)
+    logger.info("OSM (r=%dm): found %d shelters", base_radius, len(shelters_osm))
 
     # Если в районе Тель-Авива — добавляем ArcGIS
     shelters_ta = []
@@ -631,6 +686,16 @@ def fetch_shelters(lat, lon):
     # Объединяем и дедуплицируем (приоритет: TA > GovMap > OSM)
     all_shelters = shelters_ta + shelters_gov + shelters_osm
     all_shelters = deduplicate_shelters(all_shelters)
+
+    # Прогрессивное расширение радиуса: если нашли мало — ищем шире в OSM
+    for expanded_r in (3000, 5000):
+        if len(all_shelters) >= 3:
+            break
+        logger.info("Expanding OSM radius to %dm (have %d shelters)", expanded_r, len(all_shelters))
+        shelters_osm_ext = fetch_shelters_osm(lat, lon, radius_m=expanded_r)
+        extra = shelters_ta + shelters_gov + shelters_osm_ext
+        all_shelters = deduplicate_shelters(extra)
+
     all_shelters.sort(key=lambda x: x["distance"])
 
     return all_shelters[:MAX_RESULTS]
@@ -752,7 +817,7 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not shelters:
         await update.message.reply_text(
-            t(ctx, "no_shelters", radius=SEARCH_RADIUS_M, lat=lat, lon=lon),
+            t(ctx, "no_shelters", radius=5000, lat=lat, lon=lon),
         )
         return
 
