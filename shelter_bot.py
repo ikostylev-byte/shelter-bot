@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🛡️ Tel Aviv Shelter Finder Bot v4
-UX: одно сообщение, всё редактируется инлайн.
+ялла, миклат! 🛡️
+Отправляешь геолокацию — получаешь карту с 5 ближайшими убежищами.
 """
 
 import os, math, logging, asyncpg, requests
@@ -11,13 +11,12 @@ from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
-MAX_RESULTS     = 5
 SEARCH_RADIUS_M = 2000
+MAX_RESULTS     = 5
 CHECKIN_TTL_H   = 2
 
 REVIEW_TEXT, REVIEW_PHOTO = range(2)
@@ -25,6 +24,7 @@ REVIEW_TEXT, REVIEW_PHOTO = range(2)
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Кнопка геолокации внизу экрана
 LOCATION_KB = ReplyKeyboardMarkup(
     [[KeyboardButton("📍 Отправить геолокацию", request_location=True)]],
     resize_keyboard=True, one_time_keyboard=False,
@@ -33,7 +33,7 @@ LOCATION_KB = ReplyKeyboardMarkup(
 _pool = None
 
 
-# ─── DB ───────────────────────────────────────────────────────────────────────
+# ─── БАЗА ДАННЫХ ──────────────────────────────────────────────────────────────
 
 async def get_pool():
     global _pool
@@ -41,23 +41,35 @@ async def get_pool():
         _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     return _pool
 
+
 async def db_init():
     pool = await get_pool()
     async with pool.acquire() as c:
         await c.execute("""
             CREATE TABLE IF NOT EXISTS reviews (
-                id SERIAL PRIMARY KEY, shelter_id TEXT NOT NULL,
-                shelter_addr TEXT, user_id BIGINT NOT NULL, username TEXT,
-                text TEXT, photo_id TEXT, created_at TIMESTAMPTZ DEFAULT NOW()
+                id SERIAL PRIMARY KEY,
+                shelter_id TEXT NOT NULL,
+                shelter_addr TEXT,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                text TEXT,
+                photo_id TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
             )""")
         await c.execute("""
             CREATE TABLE IF NOT EXISTS checkins (
-                user_id BIGINT PRIMARY KEY, username TEXT, first_name TEXT,
-                shelter_id TEXT NOT NULL, shelter_addr TEXT, shelter_name TEXT,
-                lat DOUBLE PRECISION, lon DOUBLE PRECISION,
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                shelter_id TEXT NOT NULL,
+                shelter_addr TEXT,
+                shelter_name TEXT,
+                lat DOUBLE PRECISION,
+                lon DOUBLE PRECISION,
                 checked_in_at TIMESTAMPTZ DEFAULT NOW()
             )""")
     logger.info("DB ready")
+
 
 async def save_review(shelter_id, shelter_addr, user_id, username, text, photo_id):
     pool = await get_pool()
@@ -66,12 +78,14 @@ async def save_review(shelter_id, shelter_addr, user_id, username, text, photo_i
             "INSERT INTO reviews (shelter_id,shelter_addr,user_id,username,text,photo_id) VALUES($1,$2,$3,$4,$5,$6)",
             shelter_id, shelter_addr, user_id, username, text, photo_id)
 
+
 async def get_reviews(shelter_id, limit=3):
     pool = await get_pool()
     async with pool.acquire() as c:
         return await c.fetch(
             "SELECT * FROM reviews WHERE shelter_id=$1 ORDER BY created_at DESC LIMIT $2",
             shelter_id, limit)
+
 
 async def do_checkin(user_id, username, first_name, shelter):
     pool = await get_pool()
@@ -86,10 +100,12 @@ async def do_checkin(user_id, username, first_name, shelter):
         """, user_id, username, first_name,
             shelter["id"], shelter["address"], shelter["name"], shelter["lat"], shelter["lon"])
 
+
 async def do_checkout(user_id):
     pool = await get_pool()
     async with pool.acquire() as c:
         await c.execute("DELETE FROM checkins WHERE user_id=$1", user_id)
+
 
 async def get_buddies(shelter_id, exclude_user_id):
     cutoff = datetime.now(timezone.utc) - timedelta(hours=CHECKIN_TTL_H)
@@ -98,6 +114,7 @@ async def get_buddies(shelter_id, exclude_user_id):
         return await c.fetch(
             "SELECT * FROM checkins WHERE shelter_id=$1 AND user_id!=$2 AND checked_in_at>$3 ORDER BY checked_in_at DESC",
             shelter_id, exclude_user_id, cutoff)
+
 
 async def get_my_checkin(user_id):
     cutoff = datetime.now(timezone.utc) - timedelta(hours=CHECKIN_TTL_H)
@@ -111,62 +128,75 @@ async def get_my_checkin(user_id):
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6_371_000
-    p1,p2 = math.radians(lat1), math.radians(lat2)
-    dp,dl = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl  = math.radians(lat2-lat1), math.radians(lon2-lon1)
     a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return R*2*math.atan2(math.sqrt(a),math.sqrt(1-a))
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
 
 def shelter_type_ru(t):
     if not t: return "🛡️ Убежище"
-    m = {"חניון מחסה לציבור":"🅿️ Паркинг-убежище",
-         "מקלט ציבורי במוסדות חינוך":"🏫 Убежище (школа)",
-         "מקלט ציבורי":"🏗️ Общественное убежище",
-         "מרחב מוגן קהילתי":"🏢 Общественное убежище",
-         'ממ"ד':"🏠 Мамад","ממד":"🏠 Мамад"}
-    for h,r in m.items():
+    m = {
+        "חניון מחסה לציבור":          "🅿️ Паркинг-убежище",
+        "מקלט ציבורי במוסדות חינוך":  "🏫 Убежище (школа)",
+        "מקלט ציבורי":                "🏗️ Общественное убежище",
+        "מרחב מוגן קהילתי":           "🏢 Общественное убежище",
+        'ממ"ד': "🏠 Мамад", "ממד": "🏠 Мамад",
+    }
+    for h, r in m.items():
         if h in t: return r
     return f"🛡️ {t}"
 
+
 def parse_shelter(feat, ulat, ulon):
-    g = feat.get("geometry",{}); a = feat.get("attributes",{})
-    slat = g.get("y") or a.get("lat"); slon = g.get("x") or a.get("lon")
+    g = feat.get("geometry", {}); a = feat.get("attributes", {})
+    slat = g.get("y") or a.get("lat")
+    slon = g.get("x") or a.get("lon")
     addr = (a.get("Full_Address") or "").strip()
     if not addr:
         addr = f"{(a.get('shem_recho') or '').strip()} {str(a.get('ms_bait') or '').strip()}".strip() or "адрес не указан"
     return {
-        "id":       a.get("UniqueId") or str(a.get("oid_mitkan","")),
-        "lat":slat, "lon":slon, "address":addr,
+        "id":       a.get("UniqueId") or str(a.get("oid_mitkan", "")),
+        "lat": slat, "lon": slon,
+        "address":  addr,
         "name":     (a.get("shem") or "").strip(),
-        "type":     shelter_type_ru(a.get("t_sug","")),
+        "type":     shelter_type_ru(a.get("t_sug", "")),
         "hours":    (a.get("opening_times") or "").strip(),
         "phone":    (a.get("telephone_henion") or a.get("celolar") or "").strip(),
         "notes":    (a.get("hearot") or "").strip(),
-        "distance": round(haversine(ulat,ulon,slat,slon)),
+        "distance": round(haversine(ulat, ulon, slat, slon)),
     }
 
+
 def fetch_shelters(lat, lon):
-    params = {"where":"1=1","geometry":f"{lon},{lat}","geometryType":"esriGeometryPoint",
-              "inSR":"4326","spatialRel":"esriSpatialRelIntersects",
-              "distance":SEARCH_RADIUS_M,"units":"esriSRUnit_Meter",
-              "outFields":"*","outSR":"4326","returnGeometry":"true","f":"json","resultRecordCount":50}
-    r = requests.get(ARCGIS_URL, params=params, timeout=15); r.raise_for_status()
+    params = {
+        "where": "1=1", "geometry": f"{lon},{lat}",
+        "geometryType": "esriGeometryPoint", "inSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "distance": SEARCH_RADIUS_M, "units": "esriSRUnit_Meter",
+        "outFields": "*", "outSR": "4326", "returnGeometry": "true",
+        "f": "json", "resultRecordCount": 50,
+    }
+    r = requests.get(ARCGIS_URL, params=params, timeout=15)
+    r.raise_for_status()
     data = r.json()
     if "error" in data: raise RuntimeError(data["error"])
-    shelters = [parse_shelter(f,lat,lon) for f in data.get("features",[]) if f.get("geometry")]
+    shelters = [parse_shelter(f, lat, lon) for f in data.get("features", []) if f.get("geometry")]
     shelters.sort(key=lambda x: x["distance"])
     return shelters[:MAX_RESULTS]
 
 
+# ─── КАРТА ────────────────────────────────────────────────────────────────────
+
 def generate_map(user_lat, user_lon, shelters) -> BytesIO:
-    """Генерирует PNG-карту с маркерами убежищ."""
-    m = StaticMap(800, 600, url_template="https://tile.openstreetmap.org/{z}/{x}/{y}.png")
-    # Пользователь — синяя точка
-    m.add_marker(CircleMarker((user_lon, user_lat), "#2980B9", 16))
-    m.add_marker(CircleMarker((user_lon, user_lat), "white", 9))
-    # Убежища — красные точки
+    m = StaticMap(900, 700, url_template="https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+    # Убежища — красные
     for s in shelters:
-        m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 20))
-        m.add_marker(CircleMarker((s["lon"], s["lat"]), "white", 11))
+        m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 22))
+        m.add_marker(CircleMarker((s["lon"], s["lat"]), "white", 12))
+    # Юзер — синий поверх
+    m.add_marker(CircleMarker((user_lon, user_lat), "#2471A3", 18))
+    m.add_marker(CircleMarker((user_lon, user_lat), "white", 10))
     image = m.render()
     buf = BytesIO()
     image.save(buf, format="PNG")
@@ -174,191 +204,201 @@ def generate_map(user_lat, user_lon, shelters) -> BytesIO:
     return buf
 
 
-# ─── MESSAGE BUILDERS ─────────────────────────────────────────────────────────
+# ─── HANDLERS ─────────────────────────────────────────────────────────────────
 
-def build_list_message(shelters, buddies_by_shelter=None):
-    """Список убежищ с кнопками действий для каждого."""
-    if buddies_by_shelter is None:
-        buddies_by_shelter = {}
-    lines = ["🛡️ *Ближайшие убежища:*\n"]
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища на карте.",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=LOCATION_KB,
+    )
+
+
+async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    lat = update.message.location.latitude
+    lon = update.message.location.longitude
+    logger.info("Location: %s %s", lat, lon)
+
+    # Ищем убежища
+    try:
+        shelters = fetch_shelters(lat, lon)
+    except Exception as e:
+        logger.error("GIS error: %s", e, exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка при поиске: {e}")
+        return
+
+    if not shelters:
+        await update.message.reply_text(
+            f"😔 Убежищ в радиусе {SEARCH_RADIUS_M} м не найдено.\n"
+            f"Координаты: {lat:.5f}, {lon:.5f}",
+        )
+        return
+
+    ctx.user_data["shelters"] = shelters
+    ctx.user_data["user_lat"] = lat
+    ctx.user_data["user_lon"] = lon
+
+    # Карта
+    try:
+        map_buf = generate_map(lat, lon, shelters)
+        caption_lines = ["🔵 ты   🔴 убежища\n"]
+        for i, s in enumerate(shelters, 1):
+            caption_lines.append(f"#{i} {s['address']} — {s['distance']} м")
+        await update.message.reply_photo(
+            photo=map_buf,
+            caption="\n".join(caption_lines),
+        )
+    except Exception as e:
+        logger.error("Map error: %s", e)
+
+    # Список с кнопками выбора убежища
+    lines = ["*Выбери убежище:*\n"]
     for i, s in enumerate(shelters, 1):
-        buddies = buddies_by_shelter.get(s["id"], [])
-        who = ""
-        if buddies:
-            names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
-            who = f"  👥 {', '.join(names)}"
-        lines.append(f"*{i}.* {s['type']}\n   📍 {s['address']} — {s['distance']} м{who}")
-    text = "\n\n".join(lines)
+        line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} м_"
+        if s["hours"]: line += f"\n🕐 {s['hours']}"
+        if s["phone"]: line += f"\n📞 {s['phone']}"
+        lines.append(line)
 
     buttons = []
     for i, s in enumerate(shelters, 1):
-        buddies = buddies_by_shelter.get(s["id"], [])
-        buddy_label = f" ({len(buddies)})" if buddies else ""
-        buttons.append([
-            InlineKeyboardButton(f"🤝 Иду в #{i}{buddy_label}", callback_data=f"checkin:{s['id']}:{i}"),
-            InlineKeyboardButton(f"✍️ Отзыв #{i}", callback_data=f"review:{s['id']}:{s['address'][:30]}"),
-        ])
-    return text, InlineKeyboardMarkup(buttons)
+        buttons.append([InlineKeyboardButton(
+            f"#{i} — {s['address'][:35]}",
+            callback_data=f"select:{i-1}"
+        )])
+
+    await update.message.reply_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
-async def build_detail_message(s, idx, total, user_id):
-    """Детальная карточка одного убежища."""
-    reviews = await get_reviews(s["id"], limit=3)
+async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Пользователь выбрал убежище из списка."""
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+
+    shelters = ctx.user_data.get("shelters", [])
+    if not shelters or idx >= len(shelters):
+        await query.message.reply_text("Отправь геолокацию заново 📍")
+        return
+
+    s = shelters[idx]
+    user_id = query.from_user.id
+
+    # Кто уже идёт
     buddies = await get_buddies(s["id"], user_id)
+    reviews = await get_reviews(s["id"], limit=3)
 
-    lines = [f"{'◀️ ' if idx > 0 else ''}*{idx+1}/{total}* {s['type']}{'  ▶️' if idx < total-1 else ''}\n"]
-
-    if s["name"]: lines.append(f"🏷️ *{s['name']}*")
-    lines.append(f"📍 {s['address']}")
-    lines.append(f"📏 {s['distance']} м от тебя")
+    lines = [f"*{s['type']}*", f"📍 {s['address']}", f"📏 {s['distance']} м от тебя"]
     if s["hours"]: lines.append(f"🕐 {s['hours']}")
     if s["phone"]: lines.append(f"📞 {s['phone']}")
     if s["notes"]:
         note = s["notes"][:120] + "…" if len(s["notes"]) > 120 else s["notes"]
         lines.append(f"\nℹ️ _{note}_")
 
-    # Кто идёт
     lines.append("")
     if buddies:
         names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
-        lines.append(f"🤝 *Здесь сейчас ({len(buddies)}):* {', '.join(names)}")
+        lines.append(f"🤝 *Идут сюда ({len(buddies)}):* {', '.join(names)}")
     else:
-        lines.append("🤝 *Здесь пока никого*")
+        lines.append("🤝 *Пока никто не отметился*")
 
-    # Отзывы
-    lines.append("")
     if reviews:
-        lines.append(f"💬 *Отзывы ({len(reviews)}):*")
+        lines.append("")
+        lines.append(f"💬 *Отзывы:*")
         for r in reviews:
-            who = r["username"] or "Аноним"
-            txt = r["text"] or "_(только фото)_"
-            txt = txt[:80] + "…" if len(txt) > 80 else txt
-            lines.append(f"• *{who}:* {txt}")
-    else:
-        lines.append("💬 *Отзывов пока нет — будь первым!*")
+            txt = (r["text"] or "_(только фото)_")[:80]
+            lines.append(f"• *{r['username'] or 'Аноним'}:* {txt}")
 
-    text = "\n".join(lines)
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🤝 Иду сюда", callback_data=f"checkin:{s['id']}:{idx}"),
+            InlineKeyboardButton("✍️ Оставить отзыв", callback_data=f"review:{s['id']}:{s['address'][:30]}"),
+        ],
+        [InlineKeyboardButton("← Назад к списку", callback_data="back")],
+    ])
 
-    # Кнопки навигации + действия
-    nav = []
-    if idx > 0:   nav.append(InlineKeyboardButton("◀️", callback_data=f"shelter:{idx-1}"))
-    nav.append(InlineKeyboardButton("📋 Список", callback_data="list"))
-    if idx < total-1: nav.append(InlineKeyboardButton("▶️", callback_data=f"shelter:{idx+1}"))
-
-    actions = [
-        InlineKeyboardButton("🗺️ На карте", callback_data=f"map:{idx}"),
-        InlineKeyboardButton("✍️ Отзыв",   callback_data=f"review:{s['id']}:{s['address'][:30]}"),
-        InlineKeyboardButton("🤝 Иду сюда", callback_data=f"checkin:{s['id']}:{idx+1}"),
-    ]
-    return text, InlineKeyboardMarkup([nav, actions])
+    await query.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb,
+    )
 
 
-# ─── HANDLERS ─────────────────────────────────────────────────────────────────
-
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🛡️ *Убежища Тель-Авива*\n\nНажми кнопку внизу — найду ближайшие убежища, покажу отзывы и кто туда идёт.",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=LOCATION_KB)
-
-
-async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    lat, lon = update.message.location.latitude, update.message.location.longitude
-    logger.info("Location received: lat=%s lon=%s", lat, lon)
-    searching = await update.message.reply_text("🔍 Ищу...")
-
-    try:
-        shelters = fetch_shelters(lat, lon)
-    except Exception as e:
-        logger.error("fetch_shelters error: %s", e, exc_info=True)
-        await searching.delete()
-        await update.message.reply_text(f"❌ Ошибка API: {e}")
-        return
-
-    await searching.delete()
-
-    if not shelters:
-        await update.message.reply_text(
-            f"😔 Убежищ в радиусе {SEARCH_RADIUS_M} м не найдено.\n"
-            f"📍 Координаты: {lat:.5f}, {lon:.5f}\n\n"
-            "Попробуй отправить геолокацию ещё раз.",
-        )
-        return
-
-    ctx.user_data["shelters"] = shelters
-
-    # Загружаем кто уже идёт в каждое убежище
-    buddies_by_shelter = {}
-    for s in shelters:
-        buddies_by_shelter[s["id"]] = await get_buddies(s["id"], update.effective_user.id)
-
-    # Генерируем карту
-    try:
-        map_buf = generate_map(lat, lon, shelters)
-        caption = "\n".join(
-            f"🔴 #{i+1} {s['type']} — {s['address']} ({s['distance']} м)"
-            for i, s in enumerate(shelters)
-        ) + "\n\n🔵 — ты  |  🔴 — убежища"
-        await update.message.reply_photo(photo=map_buf, caption=caption)
-    except Exception as e:
-        logger.error("Map generation error: %s", e)
-
-    text, kb = build_list_message(shelters, buddies_by_shelter)
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-
-
-async def cb_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     shelters = ctx.user_data.get("shelters", [])
     if not shelters:
-        await query.message.edit_text("Отправь геолокацию заново 📍")
+        await query.message.reply_text("Отправь геолокацию заново 📍", reply_markup=LOCATION_KB)
         return
-    text, kb = build_list_message(shelters)
-    await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-
-
-async def cb_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    idx = int(query.data.split(":")[1])
-    shelters = ctx.user_data.get("shelters", [])
-    if not shelters or idx >= len(shelters):
-        await query.message.edit_text("Отправь геолокацию заново 📍")
-        return
-    text, kb = await build_detail_message(shelters[idx], idx, len(shelters), query.from_user.id)
-    try:
-        await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-    except BadRequest:
-        pass
-
-
-async def cb_mapall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Отправляет геометки всех убежищ."""
-    query = update.callback_query
-    await query.answer("Отправляю метки на карте...")
-    shelters = ctx.user_data.get("shelters", [])
-    if not shelters:
-        await query.message.reply_text("Отправь геолокацию заново 📍")
-        return
+    lines = ["*Выбери убежище:*\n"]
     for i, s in enumerate(shelters, 1):
-        await query.message.reply_venue(
-            latitude=s["lat"], longitude=s["lon"],
-            title=f"#{i} {s['type']}",
-            address=f"{s['address']} — {s['distance']} м",
-        )
+        line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} м_"
+        lines.append(line)
+    buttons = [[InlineKeyboardButton(f"#{i} — {s['address'][:35]}", callback_data=f"select:{i-1}")]
+               for i, s in enumerate(shelters, 1)]
+    await query.message.reply_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
-async def cb_map(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Отправляет геометку как отдельное сообщение."""
+# ── ЧЕКИН ─────────────────────────────────────────────────────────────────────
+
+async def cb_checkin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("✅ Отмечаю!")
+    _, shelter_id, idx = query.data.split(":", 2)
+    shelters = ctx.user_data.get("shelters", [])
+    shelter  = next((s for s in shelters if s["id"] == shelter_id), None)
+    if not shelter: return
+
+    user = query.from_user
+    await do_checkin(user.id, user.username, user.first_name, shelter)
+
+    buddies = await get_buddies(shelter_id, user.id)
+    if buddies:
+        names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
+        buddy_text = f"👥 Ещё здесь: {', '.join(names)}"
+    else:
+        buddy_text = "😶 Ты пока первый здесь."
+
+    await query.message.reply_text(
+        f"✅ Отмечен в *{shelter['name'] or shelter['address']}*\n"
+        f"Чекин активен {CHECKIN_TTL_H} часа.\n\n{buddy_text}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🚪 Покинуть убежище", callback_data="checkout")
+        ]]),
+    )
+
+
+async def cb_checkout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    idx = int(query.data.split(":")[1])
-    shelters = ctx.user_data.get("shelters", [])
-    if not shelters: return
-    s = shelters[idx]
-    await query.message.reply_venue(
-        latitude=s["lat"], longitude=s["lon"],
-        title=s["name"] or s["type"], address=s["address"])
+    await do_checkout(query.from_user.id)
+    await query.message.reply_text("🚪 Ты покинул убежище.", reply_markup=LOCATION_KB)
+
+
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ci = await get_my_checkin(update.effective_user.id)
+    if not ci:
+        await update.message.reply_text("Ты не отмечен ни в одном убежище.", reply_markup=LOCATION_KB)
+        return
+    buddies = await get_buddies(ci["shelter_id"], update.effective_user.id)
+    names   = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
+    await update.message.reply_text(
+        f"📍 Ты в *{ci['shelter_name'] or ci['shelter_addr']}*\n"
+        f"👥 Рядом: {', '.join(names) if names else 'никого'}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🚪 Покинуть убежище", callback_data="checkout")
+        ]]),
+    )
 
 
 # ── ОТЗЫВ ─────────────────────────────────────────────────────────────────────
@@ -370,14 +410,18 @@ async def cb_review_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["rv_id"]   = shelter_id
     ctx.user_data["rv_addr"] = shelter_addr
     await query.message.reply_text(
-        f"✍️ Пиши отзыв для *{shelter_addr}*\n\nТекст (или /skip → сразу фото):",
-        parse_mode=ParseMode.MARKDOWN, reply_markup=ReplyKeyboardRemove())
+        f"✍️ Отзыв для *{shelter_addr}*\n\nНапиши текст (или /skip → сразу к фото):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=ReplyKeyboardRemove(),
+    )
     return REVIEW_TEXT
+
 
 async def review_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["rv_text"] = update.message.text if update.message.text != "/skip" else None
     await update.message.reply_text("📷 Фото убежища (или /skip):")
     return REVIEW_PHOTO
+
 
 async def review_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     photo_id = None
@@ -390,105 +434,44 @@ async def review_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await save_review(ctx.user_data["rv_id"], ctx.user_data["rv_addr"],
                       user.id, user.username or user.first_name,
                       ctx.user_data.get("rv_text"), photo_id)
-    await update.message.reply_text("✅ Отзыв сохранён! Спасибо.", reply_markup=LOCATION_KB)
+    await update.message.reply_text("✅ Отзыв сохранён, спасибо!", reply_markup=LOCATION_KB)
     return ConversationHandler.END
+
 
 async def review_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено.", reply_markup=LOCATION_KB)
     return ConversationHandler.END
 
 
-# ── ЧЕКИН ─────────────────────────────────────────────────────────────────────
-
-async def cb_checkin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer("✅ Отмечаю тебя!")
-    _, shelter_id, idx = query.data.split(":", 2)
-    shelters = ctx.user_data.get("shelters", [])
-    shelter  = next((s for s in shelters if s["id"] == shelter_id), None)
-    if not shelter: return
-
-    user = query.from_user
-    await do_checkin(user.id, user.username, user.first_name, shelter)
-
-    # Обновляем карточку чтобы отразить чекин
-    idx_int = int(idx) - 1
-    text, kb = await build_detail_message(shelter, idx_int, len(shelters), user.id)
-    try:
-        await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
-    except BadRequest:
-        pass
-
-    # Отдельное подтверждение
-    buddies = await get_buddies(shelter_id, user.id)
-    if buddies:
-        names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
-        await query.message.reply_text(
-            f"✅ Ты в *{shelter['name'] or shelter['address']}*\n"
-            f"👥 Уже здесь: {', '.join(names)}",
-            parse_mode=ParseMode.MARKDOWN)
-    else:
-        await query.message.reply_text(
-            f"✅ Ты в *{shelter['name'] or shelter['address']}*\n😶 Пока ты первый здесь.",
-            parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ci = await get_my_checkin(update.effective_user.id)
-    if not ci:
-        await update.message.reply_text("Ты не отмечен ни в одном убежище.\nОтправь геолокацию 📍", reply_markup=LOCATION_KB)
-        return
-    buddies = await get_buddies(ci["shelter_id"], update.effective_user.id)
-    names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
-    await update.message.reply_text(
-        f"📍 Ты в *{ci['shelter_name'] or ci['shelter_addr']}*\n"
-        f"👥 Рядом: {', '.join(names) if names else 'никого'}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🚪 Покинуть убежище", callback_data="checkout")]]))
-
-
-async def cb_checkout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await do_checkout(query.from_user.id)
-    await query.message.edit_text("🚪 Ты покинул убежище.")
-
-
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📍 Нажми кнопку внизу:", reply_markup=LOCATION_KB)
-
+# ── ДИАГНОСТИКА ───────────────────────────────────────────────────────────────
 
 async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Диагностика — проверяем бот и базу."""
     await update.message.reply_text("✅ Бот живой!")
-    # Проверка базы
     try:
         pool = await get_pool()
         async with pool.acquire() as c:
-            result = await c.fetchval("SELECT 1")
-        await update.message.reply_text(f"✅ База подключена")
+            await c.fetchval("SELECT 1")
+        await update.message.reply_text("✅ База подключена")
     except Exception as e:
         await update.message.reply_text(f"❌ База: {e}")
-    # Проверка GIS API
     try:
-        import requests as req
-        r = req.get(
-            "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query",
+        r = requests.get(ARCGIS_URL,
             params={"where":"1=1","outFields":"OBJECTID","f":"json","resultRecordCount":1},
-            timeout=10
-        )
-        data = r.json()
-        cnt = len(data.get("features", []))
-        await update.message.reply_text(f"✅ GIS API доступен (features: {cnt})")
+            timeout=10)
+        cnt = len(r.json().get("features", []))
+        await update.message.reply_text(f"✅ GIS API работает (features: {cnt})")
     except Exception as e:
-        await update.message.reply_text(f"❌ GIS API недоступен: {e}")
+        await update.message.reply_text(f"❌ GIS API: {e}")
 
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error("Ошибка: %s", ctx.error, exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_message:
         await update.effective_message.reply_text(f"❌ Ошибка: {ctx.error}")
+
+
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📍 Нажми кнопку внизу:", reply_markup=LOCATION_KB)
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -500,11 +483,10 @@ def main():
         print("❌ Установи DATABASE_URL"); return
 
     import asyncio
-    logger.info("DATABASE_URL starts with: %s", DATABASE_URL[:30] if DATABASE_URL else "EMPTY")
     try:
         asyncio.get_event_loop().run_until_complete(db_init())
     except Exception as e:
-        logger.error("❌ Не удалось подключиться к БД: %s", e)
+        logger.error("DB init failed: %s", e)
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -522,18 +504,17 @@ def main():
     app.add_handler(CommandHandler("ping",   cmd_ping))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(review_conv)
-    app.add_handler(CallbackQueryHandler(cb_list,    pattern=r"^list$"))
-    app.add_handler(CallbackQueryHandler(cb_shelter, pattern=r"^shelter:"))
-    app.add_handler(CallbackQueryHandler(cb_mapall, pattern=r"^mapall$"))
-    app.add_handler(CallbackQueryHandler(cb_map,     pattern=r"^map:"))
-    app.add_handler(CallbackQueryHandler(cb_checkin, pattern=r"^checkin:"))
-    app.add_handler(CallbackQueryHandler(cb_checkout,pattern=r"^checkout$"))
+    app.add_handler(CallbackQueryHandler(cb_select_shelter, pattern=r"^select:"))
+    app.add_handler(CallbackQueryHandler(cb_back,     pattern=r"^back$"))
+    app.add_handler(CallbackQueryHandler(cb_checkin,  pattern=r"^checkin:"))
+    app.add_handler(CallbackQueryHandler(cb_checkout, pattern=r"^checkout$"))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(global_error_handler)
 
-    print("🚀 Бот v4 запущен.")
+    print("🚀 ялла, миклат! запущен.")
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
