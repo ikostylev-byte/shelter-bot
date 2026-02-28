@@ -361,8 +361,13 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     lines.append("")
     if buddies:
-        names = [f"@{b['username']}" if b["username"] else (b["first_name"] or "Аноним") for b in buddies]
-        lines.append(f"🤝 *Идут сюда ({len(buddies)}):* {', '.join(names)}")
+        # Кликабельные имена через tg://user?id=...
+        def buddy_link(b):
+            name = b["first_name"] or b["username"] or "Аноним"
+            return f"[{name}](tg://user?id={b['user_id']})"
+        names = [buddy_link(b) for b in buddies]
+        lines.append(f"🤝 *Идут сюда ({len(buddies)}):*")
+        lines.append("  ".join(names))
     else:
         lines.append("🤝 *Пока никто не отметился*")
 
@@ -373,6 +378,7 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             txt = (r["text"] or "_(только фото)_")[:80]
             lines.append(f"• *{r['username'] or 'Аноним'}:* {txt}")
 
+    # Отправляем текст
     kb = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("🤝 Иду сюда", callback_data=f"checkin:{s['id']}:{idx}"),
@@ -386,6 +392,22 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb,
     )
+
+    # Фотки людей в убежище
+    if buddies:
+        from telegram import InputMediaPhoto
+        media = []
+        for b in buddies:
+            try:
+                photos = await ctx.bot.get_user_profile_photos(b["user_id"], limit=1)
+                if photos.total_count > 0:
+                    file_id = photos.photos[0][-1].file_id
+                    name = b["first_name"] or b["username"] or "Аноним"
+                    media.append(InputMediaPhoto(media=file_id, caption=name))
+            except Exception:
+                pass
+        if media:
+            await query.message.reply_media_group(media=media)
 
 
 async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
