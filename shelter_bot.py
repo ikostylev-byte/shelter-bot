@@ -388,6 +388,24 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📍 Нажми кнопку внизу:", reply_markup=LOCATION_KB)
 
 
+async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Диагностика — проверяем бот и базу."""
+    await update.message.reply_text("✅ Бот живой!")
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as c:
+            result = await c.fetchval("SELECT 1")
+        await update.message.reply_text(f"✅ База подключена (SELECT 1 = {result})")
+    except Exception as e:
+        await update.message.reply_text(f"❌ База НЕ подключена: {e}")
+
+
+async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.error("Ошибка: %s", ctx.error, exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(f"❌ Ошибка: {ctx.error}")
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -398,7 +416,10 @@ def main():
 
     import asyncio
     logger.info("DATABASE_URL starts with: %s", DATABASE_URL[:30] if DATABASE_URL else "EMPTY")
-    asyncio.get_event_loop().run_until_complete(db_init())
+    try:
+        asyncio.get_event_loop().run_until_complete(db_init())
+    except Exception as e:
+        logger.error("❌ Не удалось подключиться к БД: %s", e)
 
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -413,6 +434,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start",  start))
+    app.add_handler(CommandHandler("ping",   cmd_ping))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(review_conv)
     app.add_handler(CallbackQueryHandler(cb_list,    pattern=r"^list$"))
@@ -422,6 +444,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_checkout,pattern=r"^checkout$"))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_error_handler(global_error_handler)
 
     print("🚀 Бот v4 запущен.")
     app.run_polling(drop_pending_updates=True)
