@@ -5,6 +5,8 @@ UX: одно сообщение, всё редактируется инлайн.
 """
 
 import os, math, logging, asyncpg, requests
+from io import BytesIO
+from staticmap import StaticMap, CircleMarker
 from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
@@ -155,6 +157,23 @@ def fetch_shelters(lat, lon):
     return shelters[:MAX_RESULTS]
 
 
+def generate_map(user_lat, user_lon, shelters) -> BytesIO:
+    """Генерирует PNG-карту с маркерами убежищ."""
+    m = StaticMap(800, 600, url_template="https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+    # Пользователь — синяя точка
+    m.add_marker(CircleMarker((user_lon, user_lat), "#2980B9", 16))
+    m.add_marker(CircleMarker((user_lon, user_lat), "white", 9))
+    # Убежища — красные точки
+    for s in shelters:
+        m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 20))
+        m.add_marker(CircleMarker((s["lon"], s["lat"]), "white", 11))
+    image = m.render()
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 # ─── MESSAGE BUILDERS ─────────────────────────────────────────────────────────
 
 def build_list_message(shelters):
@@ -258,8 +277,24 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     ctx.user_data["shelters"] = shelters
-    text, kb = build_list_message(shelters)
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    # Генерируем карту
+    try:
+        map_buf = generate_map(lat, lon, shelters)
+        caption = "\n".join(
+            f"🔴 #{i+1} {s['type']} — {s['address']} ({s['distance']} м)"
+            for i, s in enumerate(shelters)
+        ) + "\n\n🔵 — ты  |  🔴 — убежища"
+        text, kb = build_list_message(shelters)
+        await update.message.reply_photo(
+            photo=map_buf,
+            caption=caption,
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    except Exception as e:
+        logger.error("Map generation error: %s", e)
+        text, kb = build_list_message(shelters)
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 
 async def cb_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
