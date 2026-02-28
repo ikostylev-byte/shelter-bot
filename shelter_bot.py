@@ -424,6 +424,18 @@ def _settlement_names_osm(lat, lon, radius=3000):
     return [n for n, _ in places[:3]]
 
 
+# Варианты написания ивритских названий (Nominatim и GovMap иногда разходятся)
+_HE_SPELLING_VARIANTS = [
+    ("קרית", "קריית"),   # Кирьят — с/без юд
+    ("קריית", "קרית"),
+    ("גבעת", "גבעות"),   # Гиват/Гивот
+    ("גבעות", "גבעת"),
+    ("–", "-"),           # разные тире
+    ("-", "–"),
+    ("תל אביב–יפו", "תל אביב-יפו"),
+]
+
+
 def fetch_shelters_govmap(lat, lon, radius_m=None):
     """Ищем убежища через GovMap (государственный геопортал Израиля)."""
     if _itm_to_wgs is None:
@@ -436,6 +448,17 @@ def fetch_shelters_govmap(lat, lon, radius_m=None):
     if not place_names:
         logger.warning("GovMap: не удалось определить населённый пункт")
         return []
+
+    # Добавляем варианты написания (קרית ↔ קריית и т.п.)
+    expanded = []
+    for name in place_names:
+        expanded.append(name)
+        for orig, alt in _HE_SPELLING_VARIANTS:
+            if orig in name:
+                variant = name.replace(orig, alt)
+                if variant not in expanded:
+                    expanded.append(variant)
+    place_names = expanded
 
     logger.info("GovMap: кандидаты = %s", place_names)
 
@@ -665,13 +688,15 @@ def deduplicate_shelters(shelters, threshold_m=50):
 
 def fetch_shelters(lat, lon):
     """Главная функция поиска: GovMap + OSM + ArcGIS (для ТА), дедупликация, топ-N.
-    Если результатов мало — автоматически расширяем радиус OSM.
+    Если результатов мало — автоматически расширяем радиус.
     """
     base_radius = SEARCH_RADIUS_M  # 2000m
 
-    # GovMap — государственный геопортал (основной, ищем в широком радиусе)
-    shelters_gov = fetch_shelters_govmap(lat, lon, radius_m=base_radius + 1000)
-    logger.info("GovMap: found %d shelters", len(shelters_gov))
+    # GovMap — государственный геопортал (запрашиваем сразу до 5 км,
+    # фильтруем по ближнему радиусу, при расширении — по дальнему)
+    shelters_gov_all = fetch_shelters_govmap(lat, lon, radius_m=5000)
+    shelters_gov = [s for s in shelters_gov_all if s["distance"] <= base_radius + 1000]
+    logger.info("GovMap: found %d (≤3km) / %d (≤5km)", len(shelters_gov), len(shelters_gov_all))
 
     # OSM Overpass — дополнительный (стартуем с базового радиуса)
     shelters_osm = fetch_shelters_osm(lat, lon, radius_m=base_radius)
@@ -687,13 +712,14 @@ def fetch_shelters(lat, lon):
     all_shelters = shelters_ta + shelters_gov + shelters_osm
     all_shelters = deduplicate_shelters(all_shelters)
 
-    # Прогрессивное расширение радиуса: если нашли мало — ищем шире в OSM
+    # Прогрессивное расширение: если мало — ищем шире (и GovMap, и OSM)
     for expanded_r in (3000, 5000):
         if len(all_shelters) >= 3:
             break
-        logger.info("Expanding OSM radius to %dm (have %d shelters)", expanded_r, len(all_shelters))
+        logger.info("Expanding radius to %dm (have %d shelters)", expanded_r, len(all_shelters))
         shelters_osm_ext = fetch_shelters_osm(lat, lon, radius_m=expanded_r)
-        extra = shelters_ta + shelters_gov + shelters_osm_ext
+        shelters_gov_ext = [s for s in shelters_gov_all if s["distance"] <= expanded_r]
+        extra = shelters_ta + shelters_gov_ext + shelters_osm_ext
         all_shelters = deduplicate_shelters(extra)
 
     all_shelters.sort(key=lambda x: x["distance"])
