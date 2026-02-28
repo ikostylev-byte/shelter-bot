@@ -234,17 +234,20 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lat, lon = update.message.location.latitude, update.message.location.longitude
     logger.info("Location received: lat=%s lon=%s", lat, lon)
-    msg = await update.message.reply_text("🔍 Ищу...")
+    searching = await update.message.reply_text("🔍 Ищу...")
 
     try:
         shelters = fetch_shelters(lat, lon)
     except Exception as e:
         logger.error("fetch_shelters error: %s", e, exc_info=True)
-        await msg.edit_text(f"❌ Ошибка API: {e}")
+        await searching.delete()
+        await update.message.reply_text(f"❌ Ошибка API: {e}")
         return
 
+    await searching.delete()
+
     if not shelters:
-        await msg.edit_text(
+        await update.message.reply_text(
             f"😔 Убежищ в радиусе {SEARCH_RADIUS_M} м не найдено.\n"
             f"📍 Координаты: {lat:.5f}, {lon:.5f}\n\n"
             "Попробуй отправить геолокацию ещё раз.",
@@ -253,7 +256,7 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     ctx.user_data["shelters"] = shelters
     text, kb = build_list_message(shelters)
-    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 
 async def cb_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
