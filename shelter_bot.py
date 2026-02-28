@@ -193,15 +193,41 @@ def fetch_shelters(lat, lon):
 # ─── КАРТА ────────────────────────────────────────────────────────────────────
 
 def generate_map(user_lat, user_lon, shelters) -> BytesIO:
+    from PIL import ImageDraw, ImageFont
     m = StaticMap(900, 700, url_template="https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png")
     # Убежища — красные
     for s in shelters:
-        m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 22))
-        m.add_marker(CircleMarker((s["lon"], s["lat"]), "white", 12))
+        m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 30))
+        m.add_marker(CircleMarker((s["lon"], s["lat"]), "white", 18))
     # Юзер — синий поверх
-    m.add_marker(CircleMarker((user_lon, user_lat), "#2471A3", 18))
-    m.add_marker(CircleMarker((user_lon, user_lat), "white", 10))
+    m.add_marker(CircleMarker((user_lon, user_lat), "#2471A3", 22))
+    m.add_marker(CircleMarker((user_lon, user_lat), "white", 12))
     image = m.render()
+    w, h = image.size
+
+    # Пересчёт координат в пиксели
+    def to_px(lon, lat):
+        import math
+        n = 2 ** m.zoom
+        x = (lon + 180) / 360 * n
+        lat_r = math.radians(lat)
+        y = (1 - math.log(math.tan(lat_r) + 1/math.cos(lat_r)) / math.pi) / 2 * n
+        return int((x - m.x_center) * 256 + w/2), int((y - m.y_center) * 256 + h/2)
+
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except:
+        font = ImageFont.load_default()
+
+    # Номера над маркерами убежищ
+    for i, s in enumerate(shelters, 1):
+        px, py = to_px(s["lon"], s["lat"])
+        draw.ellipse([px-14, py-38, px+14, py-10], fill="white", outline="#C0392B", width=2)
+        bb = draw.textbbox((0, 0), str(i), font=font)
+        tw, th = bb[2]-bb[0], bb[3]-bb[1]
+        draw.text((px - tw//2, py - 38 + (28-th)//2), str(i), fill="#C0392B", font=font)
+
     buf = BytesIO()
     image.save(buf, format="PNG")
     buf.seek(0)
