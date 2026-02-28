@@ -167,7 +167,10 @@ def build_list_message(shelters):
 
     buttons = [[InlineKeyboardButton(f"#{i} {s['name'] or s['address'][:20]}", callback_data=f"shelter:{i-1}")]
                for i, s in enumerate(shelters, 1)]
-    buttons.append([InlineKeyboardButton("🗺️ Полная карта", url="https://gisn.tel-aviv.gov.il/iview2js4/index.aspx?zoom=14000&layers=592&back=0&year=2025")])
+    buttons.append([
+        InlineKeyboardButton("📍 Все на карте", callback_data="mapall"),
+        InlineKeyboardButton("🗺️ ГИС карта", url="https://gisn.tel-aviv.gov.il/iview2js4/index.aspx?zoom=14000&layers=592&back=0&year=2025"),
+    ])
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -283,6 +286,22 @@ async def cb_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     except BadRequest:
         pass
+
+
+async def cb_mapall(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Отправляет геометки всех убежищ."""
+    query = update.callback_query
+    await query.answer("Отправляю метки на карте...")
+    shelters = ctx.user_data.get("shelters", [])
+    if not shelters:
+        await query.message.reply_text("Отправь геолокацию заново 📍")
+        return
+    for i, s in enumerate(shelters, 1):
+        await query.message.reply_venue(
+            latitude=s["lat"], longitude=s["lon"],
+            title=f"#{i} {s['type']}",
+            address=f"{s['address']} — {s['distance']} м",
+        )
 
 
 async def cb_map(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -461,6 +480,7 @@ def main():
     app.add_handler(review_conv)
     app.add_handler(CallbackQueryHandler(cb_list,    pattern=r"^list$"))
     app.add_handler(CallbackQueryHandler(cb_shelter, pattern=r"^shelter:"))
+    app.add_handler(CallbackQueryHandler(cb_mapall, pattern=r"^mapall$"))
     app.add_handler(CallbackQueryHandler(cb_map,     pattern=r"^map:"))
     app.add_handler(CallbackQueryHandler(cb_checkin, pattern=r"^checkin:"))
     app.add_handler(CallbackQueryHandler(cb_checkout,pattern=r"^checkout$"))
