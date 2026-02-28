@@ -259,7 +259,8 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb,
         )
     except Exception as e:
-        logger.error("Map error: %s", e)
+        logger.error("Map error: %s", e, exc_info=True)
+        await update.message.reply_text(f"⚠️ Карта не загрузилась: {e}")
         # Если карта не вышла — текстовый список с теми же кнопками
         lines = [f"*Найдено {len(shelters)} убежищ:*\n"]
         for i, s in enumerate(shelters, 1):
