@@ -569,10 +569,18 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except:
         ctx.user_data.setdefault("lang", "ru")
 
+    # Кнопки языков в одну строку + кнопка геолокации внизу
+    lang_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🇷🇺 RU", callback_data="lang:ru"),
+        InlineKeyboardButton("🇮🇱 עב", callback_data="lang:he"),
+        InlineKeyboardButton("🇬🇧 EN", callback_data="lang:en"),
+    ]])
+
     await update.message.reply_text(
-        t(ctx, "welcome"),
+        "🛡️ *Yalla, Miklat! · !יאללה, מקלט · Ялла, миклат!*\n\n"
+        "🇷🇺 Выбери язык\n🇮🇱 בחר שפה\n🇬🇧 Choose language",
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=get_location_kb(ctx),
+        reply_markup=lang_kb,
     )
 
 
@@ -595,8 +603,10 @@ async def cb_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await save_user_lang(query.from_user.id, lang)
     except:
         pass
+    # После выбора языка — приветствие + кнопка геолокации
     await query.message.reply_text(
-        t(ctx, "lang_set"),
+        t(ctx, "lang_set") + "\n\n" + t(ctx, "welcome"),
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=get_location_kb(ctx),
     )
 
