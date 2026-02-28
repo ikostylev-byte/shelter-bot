@@ -193,7 +193,7 @@ def fetch_shelters(lat, lon):
 # ─── КАРТА ────────────────────────────────────────────────────────────────────
 
 def generate_map(user_lat, user_lon, shelters) -> BytesIO:
-    m = StaticMap(900, 700, url_template="https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+    m = StaticMap(900, 700, url_template="https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png")
     # Убежища — красные
     for s in shelters:
         m.add_marker(CircleMarker((s["lon"], s["lat"]), "#C0392B", 22))
