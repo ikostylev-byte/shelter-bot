@@ -271,10 +271,15 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Кнопки выбора — под картой или под текстом
     buttons = []
     for i, s in enumerate(shelters, 1):
-        buttons.append([InlineKeyboardButton(
-            f"#{i} — {s['address'][:35]}",
-            callback_data=f"select:{i-1}"
-        )])
+        waze_url = f"https://waze.com/ul?ll={s['lat']},{s['lon']}&navigate=yes"
+        gmaps_url = f"https://maps.google.com/maps?daddr={s['lat']},{s['lon']}"
+        buttons.append([
+            InlineKeyboardButton(f"#{i} {s['address'][:28]}", callback_data=f"select:{i-1}"),
+        ])
+        buttons.append([
+            InlineKeyboardButton("🚗 Waze",         url=waze_url),
+            InlineKeyboardButton("🗺️ Google Maps",  url=gmaps_url),
+        ])
     kb = InlineKeyboardMarkup(buttons)
 
     # Карта + кнопки в одном сообщении
