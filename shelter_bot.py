@@ -4,8 +4,11 @@
 Отправляешь геолокацию — получаешь карту с 5 ближайшими убежищами.
 
 Источники данных:
-1. OpenStreetMap (Overpass API) — вся страна
-2. ArcGIS Тель-Авива — дополнительные данные для ТА
+1. GovMap (ags.govmap.gov.il) — государственный геопортал, вся страна
+2. OpenStreetMap (Overpass API) — вся страна
+3. ArcGIS Тель-Авива — дополнительные данные для ТА
+
+Зависимости: pip install pyproj python-telegram-bot asyncpg requests staticmap Pillow
 """
 
 import os, math, logging, asyncpg, requests
@@ -20,13 +23,30 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
+# ─── ITM ↔ WGS84 координаты (pyproj) ────────────────────────────────────────
+try:
+    from pyproj import Transformer
+    _itm_to_wgs = Transformer.from_crs("EPSG:2039", "EPSG:4326", always_xy=True)
+    def itm_to_wgs84(x, y):
+        lon, lat = _itm_to_wgs.transform(x, y)
+        return lat, lon
+except ImportError:
+    logging.warning("pyproj не установлен — GovMap источник будет отключён. pip install pyproj")
+    _itm_to_wgs = None
+    def itm_to_wgs84(x, y):
+        return None, None
+
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
 
 # ─── ИСТОЧНИКИ ДАННЫХ ────────────────────────────────────────────────────────
-# Tel Aviv ArcGIS — оставляем как дополнительный для ТА
+# GovMap — государственный геопортал Израиля (POI слой, вся страна)
+GOVMAP_SEARCH_URL = "https://ags.govmap.gov.il/Search/FreeSearch"
+# Nominatim — обратное геокодирование для получения названия города
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
+# Tel Aviv ArcGIS — дополнительные данные для ТА
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
-# Overpass API — основной всеизраильский
+# Overpass API — OSM данные
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 SEARCH_RADIUS_M = 2000
@@ -338,6 +358,98 @@ def shelter_type_label(raw_type, lang="ru"):
     return f"🛡️ {raw_type}"
 
 
+# ── GOVMAP — ГОСУДАРСТВЕННЫЙ ГЕОПОРТАЛ (ВСЯ СТРАНА) ──────────────────────────
+
+def reverse_geocode_city(lat, lon):
+    """Получаем название города на иврите через Nominatim."""
+    try:
+        r = requests.get(NOMINATIM_URL, params={
+            "lat": lat, "lon": lon, "format": "json",
+            "zoom": 14, "accept-language": "he",
+        }, headers={"User-Agent": "YallaMiklat/1.0"}, timeout=5)
+        r.raise_for_status()
+        addr = r.json().get("address", {})
+        # Пробуем city → town → village → municipality
+        return (addr.get("city") or addr.get("town") or
+                addr.get("village") or addr.get("municipality") or
+                addr.get("county") or "")
+    except Exception as e:
+        logger.warning("Nominatim error: %s", e)
+        return ""
+
+
+def fetch_shelters_govmap(lat, lon, radius_m=None):
+    """Ищем убежища через GovMap (государственный геопортал Израиля)."""
+    if _itm_to_wgs is None:
+        return []  # pyproj не установлен
+
+    if radius_m is None:
+        radius_m = SEARCH_RADIUS_M
+
+    city = reverse_geocode_city(lat, lon)
+    if not city:
+        logger.warning("GovMap: не удалось определить город")
+        return []
+
+    logger.info("GovMap: город = %s", city)
+
+    shelters = []
+    # Ищем двумя запросами для максимального покрытия
+    for query_text in [f"מקלט {city}", f"מקלט ציבורי {city}"]:
+        try:
+            r = requests.post(GOVMAP_SEARCH_URL,
+                json={"keyword": query_text, "type": "all"},
+                headers={"Content-Type": "application/json"},
+                timeout=10)
+            r.raise_for_status()
+            results = r.json().get("data", {}).get("Result", [])
+        except Exception as e:
+            logger.warning("GovMap search error (%s): %s", query_text, e)
+            continue
+
+        for item in results:
+            itm_x = item.get("X")
+            itm_y = item.get("Y")
+            if not itm_x or not itm_y:
+                continue
+
+            slat, slon = itm_to_wgs84(itm_x, itm_y)
+            if slat is None:
+                continue
+
+            dist = haversine(lat, lon, slat, slon)
+            if dist > radius_m:
+                continue
+
+            label = item.get("ResultLable", "")
+            # "מקלט ציבורי | בת ים" → split
+            parts = label.split("|")
+            name = parts[0].strip() if parts else "מקלט"
+            loc = parts[1].strip() if len(parts) > 1 else city
+
+            shelter_id = f"gov:{item.get('ObjectID', '')}"
+            # Дедупликация внутри GovMap по ID
+            if any(s["id"] == shelter_id for s in shelters):
+                continue
+
+            shelters.append({
+                "id":       shelter_id,
+                "lat":      slat,
+                "lon":      slon,
+                "address":  f"{name}, {loc}",
+                "name":     name,
+                "type_raw": "bomb_shelter",
+                "hours":    "",
+                "phone":    "",
+                "notes":    "",
+                "distance": round(dist),
+                "source":   "gov",
+            })
+
+    shelters.sort(key=lambda x: x["distance"])
+    return shelters
+
+
 # ── OVERPASS API (OSM) — ВСЕИЗРАИЛЬСКИЙ ИСТОЧНИК ──────────────────────────────
 
 def fetch_shelters_osm(lat, lon, radius_m=None):
@@ -482,16 +594,17 @@ def fetch_shelters_arcgis(lat, lon):
 # ── ОБЪЕДИНЁННЫЙ ПОИСК ────────────────────────────────────────────────────────
 
 def deduplicate_shelters(shelters, threshold_m=50):
-    """Убираем дубли — если два убежища ближе threshold_m друг к другу, берём с меньшим distance."""
+    """Убираем дубли — если два убежища ближе threshold_m друг к другу, берём с большим приоритетом."""
+    # Приоритет: ta > gov > osm
+    priority = {"ta": 3, "gov": 2, "osm": 1}
     result = []
     for s in shelters:
         is_dup = False
-        for existing in result:
+        for i, existing in enumerate(result):
             if haversine(s["lat"], s["lon"], existing["lat"], existing["lon"]) < threshold_m:
-                # Оставляем тот, у которого больше информации или ТА (богаче)
-                if s["source"] == "ta" and existing["source"] == "osm":
-                    result.remove(existing)
-                    result.append(s)
+                # Оставляем тот, у которого выше приоритет
+                if priority.get(s["source"], 0) > priority.get(existing["source"], 0):
+                    result[i] = s
                 is_dup = True
                 break
         if not is_dup:
@@ -500,8 +613,12 @@ def deduplicate_shelters(shelters, threshold_m=50):
 
 
 def fetch_shelters(lat, lon):
-    """Главная функция поиска: OSM + ArcGIS (для ТА), дедупликация, топ-N."""
-    # Всегда ищем в OSM
+    """Главная функция поиска: GovMap + OSM + ArcGIS (для ТА), дедупликация, топ-N."""
+    # GovMap — государственный геопортал (основной)
+    shelters_gov = fetch_shelters_govmap(lat, lon)
+    logger.info("GovMap: found %d shelters", len(shelters_gov))
+
+    # OSM Overpass — дополнительный
     shelters_osm = fetch_shelters_osm(lat, lon)
     logger.info("OSM: found %d shelters", len(shelters_osm))
 
@@ -511,8 +628,8 @@ def fetch_shelters(lat, lon):
         shelters_ta = fetch_shelters_arcgis(lat, lon)
         logger.info("ArcGIS TA: found %d shelters", len(shelters_ta))
 
-    # Объединяем и дедуплицируем
-    all_shelters = shelters_ta + shelters_osm  # TA первые — приоритет при дедупликации
+    # Объединяем и дедуплицируем (приоритет: TA > GovMap > OSM)
+    all_shelters = shelters_ta + shelters_gov + shelters_osm
     all_shelters = deduplicate_shelters(all_shelters)
     all_shelters.sort(key=lambda x: x["distance"])
 
@@ -669,7 +786,7 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         map_buf = generate_map(lat, lon, shelters)
         caption_lines = [t(ctx, "map_legend") + "\n"]
         for i, s in enumerate(shelters, 1):
-            src = "🟢" if s["source"] == "ta" else "🌐"
+            src = {"ta": "🟢", "gov": "🏛️", "osm": "🌐"}.get(s["source"], "")
             caption_lines.append(f"#{i} {s['address']} — {s['distance']} {dist_unit} {src}")
         await update.message.reply_photo(
             photo=map_buf,
@@ -915,6 +1032,16 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ TA GIS API (features: {cnt})")
     except Exception as e:
         await update.message.reply_text(f"❌ TA GIS: {e}")
+    # GovMap check
+    try:
+        r = requests.post(GOVMAP_SEARCH_URL,
+            json={"keyword": "מקלט תל אביב", "type": "all"},
+            headers={"Content-Type": "application/json"}, timeout=10)
+        cnt = len(r.json().get("data", {}).get("Result", []))
+        pyproj_ok = "✅" if _itm_to_wgs is not None else "⚠️ no pyproj"
+        await update.message.reply_text(f"✅ GovMap API (results: {cnt}) {pyproj_ok}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ GovMap: {e}")
     # Overpass check
     try:
         r = requests.post(OVERPASS_URL, data={"data": '[out:json][timeout:5];node["amenity"="shelter"](32.08,34.77,32.09,34.78);out count;'}, timeout=10)
