@@ -12,7 +12,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
-DATABASE_URL = os.environ.get("DATABASE_URL", "")
+DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
 MAX_RESULTS     = 5
 SEARCH_RADIUS_M = 1000
@@ -238,8 +238,8 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         shelters = fetch_shelters(lat, lon)
     except Exception as e:
-        logger.error(e)
-        await msg.edit_text("❌ Ошибка API, попробуй позже.")
+        logger.error("fetch_shelters error: %s", e, exc_info=True)
+        await msg.edit_text(f"❌ Ошибка API: {e}")
         return
 
     if not shelters:
@@ -397,6 +397,7 @@ def main():
         print("❌ Установи DATABASE_URL"); return
 
     import asyncio
+    logger.info("DATABASE_URL starts with: %s", DATABASE_URL[:30] if DATABASE_URL else "EMPTY")
     asyncio.get_event_loop().run_until_complete(db_init())
 
     app = Application.builder().token(BOT_TOKEN).build()
