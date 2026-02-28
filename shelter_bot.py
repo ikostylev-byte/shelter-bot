@@ -7,6 +7,10 @@
 import os, math, logging, asyncpg, requests
 from io import BytesIO
 from staticmap import StaticMap, CircleMarker
+import PIL.Image
+# staticmap использует устаревший ANTIALIAS — патчим
+if not hasattr(PIL.Image, 'ANTIALIAS'):
+    PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
