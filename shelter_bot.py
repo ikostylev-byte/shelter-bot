@@ -233,7 +233,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lat, lon = update.message.location.latitude, update.message.location.longitude
-    msg = await update.message.reply_text("🔍 Ищу...", reply_markup=LOCATION_KB)
+    msg = await update.message.reply_text("🔍 Ищу...")
 
     try:
         shelters = fetch_shelters(lat, lon)
