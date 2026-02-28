@@ -238,7 +238,16 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["user_lat"] = lat
     ctx.user_data["user_lon"] = lon
 
-    # Карта
+    # Кнопки выбора — под картой или под текстом
+    buttons = []
+    for i, s in enumerate(shelters, 1):
+        buttons.append([InlineKeyboardButton(
+            f"#{i} — {s['address'][:35]}",
+            callback_data=f"select:{i-1}"
+        )])
+    kb = InlineKeyboardMarkup(buttons)
+
+    # Карта + кнопки в одном сообщении
     try:
         map_buf = generate_map(lat, lon, shelters)
         caption_lines = ["🔵 ты   🔴 убежища\n"]
@@ -247,30 +256,22 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_photo(
             photo=map_buf,
             caption="\n".join(caption_lines),
+            reply_markup=kb,
         )
     except Exception as e:
         logger.error("Map error: %s", e)
-
-    # Список с кнопками выбора убежища
-    lines = ["*Выбери убежище:*\n"]
-    for i, s in enumerate(shelters, 1):
-        line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} м_"
-        if s["hours"]: line += f"\n🕐 {s['hours']}"
-        if s["phone"]: line += f"\n📞 {s['phone']}"
-        lines.append(line)
-
-    buttons = []
-    for i, s in enumerate(shelters, 1):
-        buttons.append([InlineKeyboardButton(
-            f"#{i} — {s['address'][:35]}",
-            callback_data=f"select:{i-1}"
-        )])
-
-    await update.message.reply_text(
-        "\n\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+        # Если карта не вышла — текстовый список с теми же кнопками
+        lines = [f"*Найдено {len(shelters)} убежищ:*\n"]
+        for i, s in enumerate(shelters, 1):
+            line = f"*#{i}* {s['type']}\n📍 {s['address']} — _{s['distance']} м_"
+            if s["hours"]: line += f"\n🕐 {s['hours']}"
+            if s["phone"]: line += f"\n📞 {s['phone']}"
+            lines.append(line)
+        await update.message.reply_text(
+            "\n\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb,
+        )
 
 
 async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
