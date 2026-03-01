@@ -4,9 +4,10 @@
 Отправляешь геолокацию — получаешь карту с 5 ближайшими убежищами.
 
 Источники данных:
-1. GovMap (ags.govmap.gov.il) — государственный геопортал, вся страна
-2. OpenStreetMap (Overpass API) — вся страна
-3. ArcGIS Тель-Авива — дополнительные данные для ТА
+1. Муниципальные ArcGIS (20+ городов) — пространственный запрос
+2. GovMap (ags.govmap.gov.il) — государственный геопортал, вся страна
+3. OpenStreetMap (Overpass API) — вся страна
+4. ArcGIS Тель-Авива — дополнительные данные для ТА
 
 Зависимости: pip install pyproj python-telegram-bot asyncpg requests staticmap Pillow
 """
@@ -48,6 +49,75 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
 # Overpass API — OSM данные
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+
+# ─── МУНИЦИПАЛЬНЫЕ ArcGIS ENDPOINTS ────────────────────────────────────────
+# Каждый endpoint поддерживает spatial query (geometry + distance)
+# bbox: (min_lat, min_lon, max_lat, max_lon) — грубый фильтр, чтобы не дёргать далёкие серверы
+MUNICIPAL_ARCGIS = [
+    {"name": "Holon",
+     "url": "https://services2.arcgis.com/cjDo9oPmimdHxumn/arcgis/rest/services/%D7%9E%D7%A4%D7%AA_%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_%D7%A4%D7%AA%D7%95%D7%97%D7%99%D7%9D_WFL1/FeatureServer/0",
+     "bbox": (31.98, 34.73, 32.06, 34.80)},
+    {"name": "Herzliya",
+     "url": "https://services3.arcgis.com/9qGhZGtb39XMVQyR/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_2025/FeatureServer/0",
+     "bbox": (32.13, 34.78, 32.20, 34.88)},
+    {"name": "Petah Tikva",
+     "url": "https://services2.arcgis.com/LRSgLpRWTkMT0jqN/arcgis/rest/services/miklat_bh/FeatureServer/0",
+     "bbox": (32.06, 34.86, 32.13, 34.99)},
+    {"name": "Ashkelon",
+     "url": "https://services1.arcgis.com/yAQXemoDSgzdfV2A/arcgis/rest/services/public_shelter/FeatureServer/0",
+     "bbox": (31.62, 34.52, 31.70, 34.60)},
+    {"name": "Nahariya",
+     "url": "https://services-eu1.arcgis.com/mFG6VsJiT6hDsVLu/arcgis/rest/services/%D7%A0%D7%94%D7%A8%D7%99%D7%94_%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_%D7%A6%D7%99%D7%91%D7%95%D7%A8%D7%99%D7%99%D7%9D/FeatureServer/0",
+     "bbox": (32.97, 35.06, 33.05, 35.12)},
+    {"name": "Akko",
+     "url": "https://services8.arcgis.com/GY0eO9hmNflcIYdR/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_%D7%A6%D7%99%D7%91%D7%95%D7%A8%D7%99%D7%99%D7%9D/FeatureServer/0",
+     "bbox": (32.90, 35.05, 32.95, 35.10)},
+    {"name": "Eilat",
+     "url": "https://services9.arcgis.com/BtqYDIRT3FCK6rgL/arcgis/rest/services/miklatim/FeatureServer/0",
+     "bbox": (29.52, 34.90, 29.60, 35.00)},
+    {"name": "Nof HaGalil",
+     "url": "https://services1.arcgis.com/aNzvrLxjvQddMgHb/arcgis/rest/services/miklatim/FeatureServer/0",
+     "bbox": (32.68, 35.28, 32.74, 35.36)},
+    {"name": "Nesher",
+     "url": "https://services7.arcgis.com/EPYs7jIqde3L8ql3/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_%D7%A0%D7%A9%D7%A8/FeatureServer/0",
+     "bbox": (32.74, 35.02, 32.78, 35.07)},
+    {"name": "Yerucham",
+     "url": "https://services8.arcgis.com/o9mRsTJvcMg9lfkv/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D/FeatureServer/0",
+     "bbox": (30.96, 34.90, 31.02, 34.96)},
+    {"name": "Ofakim",
+     "url": "https://services3.arcgis.com/iL7nIcXU1m2M6qTw/arcgis/rest/services/%D7%A9%D7%9B%D7%91%D7%AA_%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_View/FeatureServer/0",
+     "bbox": (31.27, 34.59, 31.33, 34.65)},
+    {"name": "Netivot",
+     "url": "https://services7.arcgis.com/thA42rK5GLTTowD8/arcgis/rest/services/Netivot_GIS_Publish_WFL1/FeatureServer/43",
+     "bbox": (31.40, 34.57, 31.45, 34.63)},
+    {"name": "Nes Ziona",
+     "url": "https://services-eu1.arcgis.com/1SaThKhnIOL6Cfhz/arcgis/rest/services/miklatim/FeatureServer/0",
+     "bbox": (31.91, 34.78, 31.96, 34.83)},
+    {"name": "Kfar Kasem",
+     "url": "https://services6.arcgis.com/Ol4ENCL43hnNo9iM/arcgis/rest/services/miklatim/FeatureServer/0",
+     "bbox": (32.10, 34.96, 32.14, 35.00)},
+    {"name": "Beit Shean",
+     "url": "https://services1.arcgis.com/yAQXemoDSgzdfV2A/arcgis/rest/services/_מקלטים_ינואר_2025_ביתשאן/FeatureServer/3",
+     "bbox": (32.47, 35.47, 32.53, 35.53)},
+    {"name": "Kiryat Malakhi",
+     "url": "https://services3.arcgis.com/XBDMqmX1PKcVQCKG/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_%D7%AA%D7%A6%D7%95%D7%92%D7%941/FeatureServer/0",
+     "bbox": (31.71, 34.72, 31.76, 34.77)},
+    {"name": "Emek Hefer",
+     "url": "https://services5.arcgis.com/sifKFbbdIa4WOV8T/arcgis/rest/services/%D7%A2%D7%9E%D7%A7_%D7%97%D7%A4%D7%A8_%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D/FeatureServer/24",
+     "bbox": (32.28, 34.85, 32.45, 35.10)},
+    {"name": "Misgav",
+     "url": "https://services5.arcgis.com/L6dfICHVBGbPmyQq/arcgis/rest/services/msg_miklat_public/FeatureServer/0",
+     "bbox": (32.78, 35.15, 32.95, 35.35)},
+    {"name": "Ramat HaNegev",
+     "url": "https://services9.arcgis.com/PwnRxbfXq19ftNRF/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D_%D7%A8%D7%9E%D7%AA_%D7%94%D7%A0%D7%92%D7%91/FeatureServer/0",
+     "bbox": (30.40, 34.40, 31.10, 35.20)},
+    {"name": "Eilot",
+     "url": "https://services9.arcgis.com/czYNx0joeRNMma4B/arcgis/rest/services/%D7%9E%D7%A7%D7%9C%D7%98%D7%99%D7%9D/FeatureServer/0",
+     "bbox": (29.45, 34.90, 29.65, 35.10)},
+    {"name": "TA kindergartens",
+     "url": "https://services3.arcgis.com/PcGFyTym9yKZBRgz/arcgis/rest/services/miklatim_ganim/FeatureServer/0",
+     "bbox": (32.03, 34.74, 32.15, 34.82)},
+]
 
 SEARCH_RADIUS_M = 2000
 MAX_RESULTS     = 5
@@ -435,9 +505,15 @@ _HE_SPELLING_VARIANTS = [
     ("תל אביב–יפו", "תל אביב-יפו"),
 ]
 
+# In-memory кэш убежищ по городам: {"חיפה": {oid: shelter_dict, ...}}
+# Заполняется при первом запросе из города, потом переиспользуется
+_govmap_cache = {}
+
 
 def fetch_shelters_govmap(lat, lon, radius_m=None):
-    """Ищем убежища через GovMap (государственный геопортал Израиля)."""
+    """Ищем убежища через GovMap (государственный геопортал Израиля).
+    Кэшируем все убежища города — при повторном запросе из того же города моментально.
+    """
     if _itm_to_wgs is None:
         return []  # pyproj не установлен
 
@@ -462,11 +538,24 @@ def fetch_shelters_govmap(lat, lon, radius_m=None):
 
     logger.info("GovMap: кандидаты = %s", place_names)
 
-    shelters = []
-    # Ищем по всем кандидатам имён, двумя вариантами запроса каждый
-    seen_queries = set()
+    # Собираем все убежища из кэша или API
+    all_cached = {}
+    cities_to_fetch = []
     for city in place_names:
-        for query_text in [f"מקלט {city}", f"מקלט ציבורי {city}"]:
+        if city in _govmap_cache:
+            for oid, data in _govmap_cache[city].items():
+                if oid not in all_cached:
+                    all_cached[oid] = data
+        else:
+            cities_to_fetch.append(city)
+
+    # Запрашиваем GovMap для некэшированных городов
+    for city in cities_to_fetch:
+        city_shelters = {}
+        # 4 паттерна запросов для максимального покрытия
+        seen_queries = set()
+        for prefix in ["מקלט", "מקלט ציבורי", "מקלט מספר", "מקלט מס"]:
+            query_text = f"{prefix} {city}"
             if query_text in seen_queries:
                 continue
             seen_queries.add(query_text)
@@ -482,43 +571,45 @@ def fetch_shelters_govmap(lat, lon, radius_m=None):
                 continue
 
             for item in results:
+                oid = item.get("ObjectID")
+                if oid in city_shelters or oid in all_cached:
+                    continue
                 itm_x = item.get("X")
                 itm_y = item.get("Y")
                 if not itm_x or not itm_y:
                     continue
-
                 slat, slon = itm_to_wgs84(itm_x, itm_y)
                 if slat is None:
                     continue
 
-                dist = haversine(lat, lon, slat, slon)
-                if dist > radius_m:
-                    continue
-
                 label = item.get("ResultLable", "")
-                # "מקלט ציבורי | בת ים" → split
                 parts = label.split("|")
                 name = parts[0].strip() if parts else "מקלט"
                 loc = parts[1].strip() if len(parts) > 1 else city
 
-                shelter_id = f"gov:{item.get('ObjectID', '')}"
-                # Дедупликация внутри GovMap по ID
-                if any(s["id"] == shelter_id for s in shelters):
-                    continue
-
-                shelters.append({
-                    "id":       shelter_id,
+                city_shelters[oid] = {
+                    "id":       f"gov:{oid}",
                     "lat":      slat,
                     "lon":      slon,
                     "address":  f"{name}, {loc}",
                     "name":     name,
                     "type_raw": "bomb_shelter",
-                    "hours":    "",
-                    "phone":    "",
-                    "notes":    "",
-                    "distance": round(dist),
+                    "hours":    "", "phone": "", "notes": "",
                     "source":   "gov",
-                })
+                }
+
+        _govmap_cache[city] = city_shelters
+        logger.info("GovMap: cached %d shelters for '%s'", len(city_shelters), city)
+        all_cached.update(city_shelters)
+
+    # Фильтруем по радиусу и добавляем расстояние
+    shelters = []
+    for oid, s in all_cached.items():
+        dist = haversine(lat, lon, s["lat"], s["lon"])
+        if dist <= radius_m:
+            shelter = dict(s)
+            shelter["distance"] = round(dist)
+            shelters.append(shelter)
 
     shelters.sort(key=lambda x: x["distance"])
     return shelters
@@ -665,12 +756,127 @@ def fetch_shelters_arcgis(lat, lon):
         return []
 
 
+# ── МУНИЦИПАЛЬНЫЕ ArcGIS: ПРОСТРАНСТВЕННЫЙ ЗАПРОС ────────────────────────────
+
+def _in_bbox(lat, lon, bbox, margin=0.05):
+    """Проверяем, попадает ли точка в bbox с запасом (margin в градусах ≈ 5 км)."""
+    return (bbox[0] - margin <= lat <= bbox[2] + margin and
+            bbox[1] - margin <= lon <= bbox[3] + margin)
+
+
+def _parse_municipal_feature(feat, ulat, ulon, source_name):
+    """Универсальный парсер для муниципальных ArcGIS (разные схемы полей)."""
+    g = feat.get("geometry", {})
+    a = feat.get("attributes", {})
+    slat = g.get("y")
+    slon = g.get("x")
+    if not slat or not slon or abs(slat) < 1:
+        return None
+
+    dist = haversine(ulat, ulon, slat, slon)
+
+    # Адрес — пробуем разные поля
+    addr = ""
+    for key in ("Full_Address", "כתובת", "Adress", "adress", "ADDRESS",
+                "ShelterAddress", "o_adress"):
+        v = (a.get(key) or "").strip()
+        if v and v != " ":
+            addr = v
+            break
+    if not addr:
+        street = (a.get("shem_recho") or a.get("STREETNAME") or "").strip()
+        house = str(a.get("ms_bait") or a.get("HOUSE") or "").strip()
+        addr = f"{street} {house}".strip()
+
+    # Название
+    name = ""
+    for key in ("name", "Name", "shem", "ShelterName", "ID", "מקלט",
+                "o_name", "place", "Miklat_Num"):
+        v = str(a.get(key) or "").strip()
+        if v and v != " " and v != "None":
+            name = v
+            break
+    if not name:
+        name = f"מקלט ({source_name})"
+
+    # Тип
+    type_raw = (a.get("t_sug") or a.get("LayerNa") or a.get("שימוש_ראשי")
+                or a.get("place") or "bomb_shelter")
+
+    # ID — стабильный
+    oid = a.get("OBJECTID") or a.get("OBJECTID_1") or a.get("FID") or ""
+    shelter_id = f"muni:{source_name}:{oid}"
+
+    return {
+        "id":       shelter_id,
+        "lat":      slat,
+        "lon":      slon,
+        "address":  addr or f"{name}, {source_name}",
+        "name":     name,
+        "type_raw": type_raw,
+        "hours":    (a.get("opening_times") or "").strip() if isinstance(a.get("opening_times"), str) else "",
+        "phone":    "",
+        "notes":    (a.get("הערות") or a.get("hearot") or a.get("Comments") or "").strip() if isinstance(a.get("הערות") or a.get("hearot") or a.get("Comments"), str) else "",
+        "distance": round(dist),
+        "source":   "muni",
+    }
+
+
+def fetch_shelters_municipal(lat, lon, radius_m=None):
+    """Запрашиваем все релевантные муниципальные ArcGIS endpoints (spatial query)."""
+    if radius_m is None:
+        radius_m = SEARCH_RADIUS_M
+
+    # Определяем, какие endpoints могут дать результаты
+    relevant = [ep for ep in MUNICIPAL_ARCGIS if _in_bbox(lat, lon, ep["bbox"])]
+    if not relevant:
+        return []
+
+    logger.info("Municipal ArcGIS: querying %d endpoints: %s",
+                len(relevant), [ep["name"] for ep in relevant])
+
+    shelters = []
+    for ep in relevant:
+        params = {
+            "where": "1=1",
+            "geometry": f"{lon},{lat}",
+            "geometryType": "esriGeometryPoint",
+            "inSR": "4326",
+            "spatialRel": "esriSpatialRelIntersects",
+            "distance": radius_m,
+            "units": "esriSRUnit_Meter",
+            "outFields": "*",
+            "outSR": "4326",
+            "returnGeometry": "true",
+            "f": "json",
+            "resultRecordCount": 100,
+        }
+        try:
+            r = requests.get(ep["url"] + "/query", params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+            if "error" in data:
+                logger.warning("Municipal %s error: %s", ep["name"], data["error"])
+                continue
+            features = data.get("features", [])
+            for feat in features:
+                s = _parse_municipal_feature(feat, lat, lon, ep["name"])
+                if s and s["distance"] <= radius_m:
+                    shelters.append(s)
+            if features:
+                logger.info("Municipal %s: %d shelters", ep["name"], len(features))
+        except Exception as e:
+            logger.warning("Municipal %s error: %s", ep["name"], e)
+
+    return shelters
+
+
 # ── ОБЪЕДИНЁННЫЙ ПОИСК ────────────────────────────────────────────────────────
 
 def deduplicate_shelters(shelters, threshold_m=50):
     """Убираем дубли — если два убежища ближе threshold_m друг к другу, берём с большим приоритетом."""
-    # Приоритет: ta > gov > osm
-    priority = {"ta": 3, "gov": 2, "osm": 1}
+    # Приоритет: ta > muni > gov > osm
+    priority = {"ta": 4, "muni": 3, "gov": 2, "osm": 1}
     result = []
     for s in shelters:
         is_dup = False
@@ -687,39 +893,45 @@ def deduplicate_shelters(shelters, threshold_m=50):
 
 
 def fetch_shelters(lat, lon):
-    """Главная функция поиска: GovMap + OSM + ArcGIS (для ТА), дедупликация, топ-N.
+    """Главная функция поиска: Municipal + GovMap + OSM + ArcGIS (ТА), дедупликация, топ-N.
     Если результатов мало — автоматически расширяем радиус.
     """
     base_radius = SEARCH_RADIUS_M  # 2000m
 
-    # GovMap — государственный геопортал (запрашиваем сразу до 5 км,
-    # фильтруем по ближнему радиусу, при расширении — по дальнему)
+    # 1. Муниципальные ArcGIS — пространственный запрос (самый точный)
+    shelters_muni = fetch_shelters_municipal(lat, lon, radius_m=5000)
+    shelters_muni_near = [s for s in shelters_muni if s["distance"] <= base_radius]
+    logger.info("Municipal: found %d (≤%dm) / %d (≤5km)",
+                len(shelters_muni_near), base_radius, len(shelters_muni))
+
+    # 2. GovMap — государственный геопортал (текстовый поиск, до 5 км)
     shelters_gov_all = fetch_shelters_govmap(lat, lon, radius_m=5000)
     shelters_gov = [s for s in shelters_gov_all if s["distance"] <= base_radius + 1000]
     logger.info("GovMap: found %d (≤3km) / %d (≤5km)", len(shelters_gov), len(shelters_gov_all))
 
-    # OSM Overpass — дополнительный (стартуем с базового радиуса)
+    # 3. OSM Overpass — дополнительный
     shelters_osm = fetch_shelters_osm(lat, lon, radius_m=base_radius)
     logger.info("OSM (r=%dm): found %d shelters", base_radius, len(shelters_osm))
 
-    # Если в районе Тель-Авива — добавляем ArcGIS
+    # 4. ArcGIS Тель-Авив
     shelters_ta = []
     if is_in_tel_aviv(lat, lon):
         shelters_ta = fetch_shelters_arcgis(lat, lon)
         logger.info("ArcGIS TA: found %d shelters", len(shelters_ta))
 
-    # Объединяем и дедуплицируем (приоритет: TA > GovMap > OSM)
-    all_shelters = shelters_ta + shelters_gov + shelters_osm
+    # Объединяем и дедуплицируем (приоритет: TA > Muni > GovMap > OSM)
+    all_shelters = shelters_ta + shelters_muni_near + shelters_gov + shelters_osm
     all_shelters = deduplicate_shelters(all_shelters)
 
-    # Прогрессивное расширение: если мало — ищем шире (и GovMap, и OSM)
+    # Прогрессивное расширение: если мало — ищем шире
     for expanded_r in (3000, 5000):
         if len(all_shelters) >= 3:
             break
         logger.info("Expanding radius to %dm (have %d shelters)", expanded_r, len(all_shelters))
         shelters_osm_ext = fetch_shelters_osm(lat, lon, radius_m=expanded_r)
         shelters_gov_ext = [s for s in shelters_gov_all if s["distance"] <= expanded_r]
-        extra = shelters_ta + shelters_gov_ext + shelters_osm_ext
+        shelters_muni_ext = [s for s in shelters_muni if s["distance"] <= expanded_r]
+        extra = shelters_ta + shelters_muni_ext + shelters_gov_ext + shelters_osm_ext
         all_shelters = deduplicate_shelters(extra)
 
     all_shelters.sort(key=lambda x: x["distance"])
