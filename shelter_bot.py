@@ -871,6 +871,10 @@ logger = logging.getLogger(__name__)
 # Простейший i18n: юзер выбирает язык командой /lang
 TEXTS = {
     "ru": {
+        "menu_report": "📝 Добавить миклат",
+        "menu_lang":   "🌐 Язык",
+        "menu_help":   "❓ Помощь",
+        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~7,700 убежищ по стране",
         "welcome":      "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища.\n\nНашёл миклат, которого нет в базе? → /report",
         "send_loc":     "📍 Отправить геолокацию",
         "no_shelters":  "😔 Убежищ в радиусе {radius} м не найдено.\nКоординаты: {lat:.5f}, {lon:.5f}\n\nПопробуй увеличить радиус /radius или поискать на Google Maps: מקלט ציבורי",
@@ -911,6 +915,10 @@ TEXTS = {
         "report_cancel": "Отменено.",
     },
     "he": {
+        "menu_report": "📝 הוסף מקלט",
+        "menu_lang":   "🌐 שפה",
+        "menu_help":   "❓ עזרה",
+        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~7,700 מקלטים",
         "welcome":      "🛡️ *יאללה, מקלט!*\n\nשלח מיקום — אראה לך את המקלטים הקרובים.\n\nמצאת מקלט שלא נמצא? → /report",
         "send_loc":     "📍 שלח מיקום",
         "no_shelters":  "😔 לא נמצאו מקלטים ברדיוס {radius} מ'.\nקואורדינטות: {lat:.5f}, {lon:.5f}\n\nחפש ב-Google Maps: מקלט ציבורי",
@@ -951,6 +959,10 @@ TEXTS = {
         "report_cancel": "בוטל.",
     },
     "en": {
+        "menu_report": "📝 Add shelter",
+        "menu_lang":   "🌐 Language",
+        "menu_help":   "❓ Help",
+        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~7,700 shelters",
         "welcome":      "🛡️ *Yalla, Miklat!*\n\nSend your location — I'll show the nearest shelters.\n\nFound a shelter not in our database? → /report",
         "send_loc":     "📍 Send location",
         "no_shelters":  "😔 No shelters within {radius} m.\nCoords: {lat:.5f}, {lon:.5f}\n\nTry Google Maps: מקלט ציבורי nearby",
@@ -1003,11 +1015,11 @@ def t(ctx, key, **kwargs):
 
 def get_location_kb(ctx):
     lang = (ctx.user_data or {}).get("lang", "ru")
-    label = TEXTS.get(lang, TEXTS["ru"])["send_loc"]
-    return ReplyKeyboardMarkup(
-        [[KeyboardButton(label, request_location=True)]],
-        resize_keyboard=True, one_time_keyboard=False,
-    )
+    tx = TEXTS.get(lang, TEXTS["ru"])
+    return ReplyKeyboardMarkup([
+        [KeyboardButton(tx["send_loc"], request_location=True)],
+        [tx["menu_report"], tx["menu_lang"], tx["menu_help"]],
+    ], resize_keyboard=True, one_time_keyboard=False)
 
 
 _pool = None
@@ -2236,6 +2248,23 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data["lang"] = await load_user_lang(update.effective_user.id)
         except:
             ctx.user_data["lang"] = "ru"
+
+    text = (update.message.text or "").strip()
+
+    # Кнопки меню (на всех языках)
+    # NB: кнопка «Добавить миклат» обрабатывается через ConversationHandler (report_conv)
+    lang_btns = {TEXTS[l].get("menu_lang", "") for l in TEXTS}
+    help_btns = {TEXTS[l].get("menu_help", "") for l in TEXTS}
+
+    if text in lang_btns:
+        return await cmd_lang(update, ctx)
+
+    if text in help_btns:
+        await update.message.reply_text(
+            t(ctx, "help_text"), parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_location_kb(ctx))
+        return
+
     await update.message.reply_text(t(ctx, "send_loc_btn"), reply_markup=get_location_kb(ctx))
 
 
@@ -2304,97 +2333,6 @@ async def report_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 
-# ── КРАУДСОРСИНГ: /report ────────────────────────────────────────────────────
-
-async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Начало добавления нового убежища."""
-    lang = await get_user_lang(update.effective_user.id)
-    texts = {
-        "ru": "📍 Отправь геолокацию убежища, которое хочешь добавить.\n"
-              "Встань рядом с ним и отправь свою текущую геолокацию.",
-        "he": "📍 שלח את המיקום של המקלט שברצונך להוסיף.\n"
-              "עמוד לידו ושלח את המיקום הנוכחי שלך.",
-        "en": "📍 Send the location of the shelter you want to add.\n"
-              "Stand near it and share your current location.",
-    }
-    kb = ReplyKeyboardMarkup(
-        [[KeyboardButton("📍 שלח מיקום / Send location", request_location=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
-    await update.message.reply_text(texts.get(lang, texts["en"]), reply_markup=kb)
-    return REPORT_LOCATION
-
-
-async def report_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получили локацию нового убежища."""
-    loc = update.message.location
-    context.user_data["report_lat"] = loc.latitude
-    context.user_data["report_lon"] = loc.longitude
-    lang = await get_user_lang(update.effective_user.id)
-    texts = {
-        "ru": "✅ Локация принята!\n"
-              "Теперь отправь краткое описание (адрес, этаж, ориентиры) или фото входа.\n"
-              "Или /cancel для отмены.",
-        "he": "✅ המיקום התקבל!\n"
-              "עכשיו שלח תיאור קצר (כתובת, קומה, ציוני דרך) או תמונה של הכניסה.\n"
-              "או /cancel לביטול.",
-        "en": "✅ Location received!\n"
-              "Now send a brief description (address, floor, landmarks) or a photo.\n"
-              "Or /cancel to abort.",
-    }
-    await update.message.reply_text(texts.get(lang, texts["en"]), reply_markup=ReplyKeyboardRemove())
-    return REPORT_DESC
-
-
-async def report_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получили описание / фото нового убежища — сохраняем."""
-    lat = context.user_data.get("report_lat")
-    lon = context.user_data.get("report_lon")
-    if not lat or not lon:
-        await update.message.reply_text("❌ Location missing. /report to start over.")
-        return ConversationHandler.END
-
-    user = update.effective_user
-    description = ""
-    photo_id = ""
-
-    if update.message.photo:
-        photo_id = update.message.photo[-1].file_id
-        description = (update.message.caption or "").strip()
-    elif update.message.text:
-        description = update.message.text.strip()
-
-    if not description and not photo_id:
-        description = "מקלט"
-
-    try:
-        await save_user_shelter(lat, lon, description, photo_id, user.id, user.username or "")
-        total = await count_user_shelters()
-    except Exception as e:
-        logger.error("save_user_shelter error: %s", e)
-        await update.message.reply_text("❌ DB error — try later.")
-        return ConversationHandler.END
-
-    lang = await get_user_lang(user.id)
-    texts = {
-        "ru": f"🎉 Спасибо! Убежище добавлено в базу.\n"
-              f"📊 Всего убежищ от пользователей: {total}\n"
-              f"Теперь другие смогут его найти!",
-        "he": f"🎉 תודה! המקלט נוסף למאגר.\n"
-              f"📊 סה\"כ מקלטים מדיווחי משתמשים: {total}\n"
-              f"עכשיו אחרים יוכלו למצוא אותו!",
-        "en": f"🎉 Thanks! Shelter added to the database.\n"
-              f"📊 Total user-reported shelters: {total}\n"
-              f"Others can now find it!",
-    }
-    await update.message.reply_text(texts.get(lang, texts["en"]))
-    return ConversationHandler.END
-
-
-async def report_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Cancelled.", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
-
 
 def main():
     if BOT_TOKEN == "YOUR_TOKEN_HERE":
@@ -2420,21 +2358,18 @@ def main():
         per_message=False,
     )
 
+    # Фильтр для кнопки «Добавить миклат / הוסף מקלט / Add shelter»
+    _report_btn_texts = [TEXTS[l].get("menu_report", "") for l in TEXTS]
+    report_btn_filter = filters.Text(_report_btn_texts)
+
     report_conv = ConversationHandler(
-        entry_points=[CommandHandler("report", cmd_report)],
+        entry_points=[
+            CommandHandler("report", cmd_report),
+            MessageHandler(report_btn_filter, cmd_report),
+        ],
         states={
             REPORT_LOCATION: [MessageHandler(filters.LOCATION, report_location)],
             REPORT_DESC:     [MessageHandler(filters.PHOTO | filters.TEXT, report_desc)],
-        },
-        fallbacks=[CommandHandler("cancel", report_cancel)],
-        per_message=False,
-    )
-
-    report_conv = ConversationHandler(
-        entry_points=[CommandHandler("report", cmd_report)],
-        states={
-            REPORT_LOCATION: [MessageHandler(filters.LOCATION, report_location)],
-            REPORT_DESC:     [MessageHandler(filters.TEXT | filters.PHOTO, report_desc)],
         },
         fallbacks=[CommandHandler("cancel", report_cancel)],
         per_message=False,
@@ -2445,7 +2380,6 @@ def main():
     app.add_handler(CommandHandler("ping",   cmd_ping))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("lang",   cmd_lang))
-    app.add_handler(report_conv)
     app.add_handler(review_conv)
     app.add_handler(CallbackQueryHandler(cb_lang,           pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(cb_select_shelter, pattern=r"^select:"))
