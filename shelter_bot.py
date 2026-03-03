@@ -13,7 +13,6 @@
 """
 
 import os, math, logging, asyncpg, requests, asyncio
-import aiohttp
 from io import BytesIO
 from staticmap import StaticMap, CircleMarker
 import PIL.Image
@@ -50,6 +49,8 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/reverse"
 ARCGIS_URL   = "https://gisn.tel-aviv.gov.il/arcgis/rest/services/WM/IView2WM/MapServer/592/query"
 # Overpass API — OSM данные
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+WAZE_SEARCH_URL = "https://www.waze.com/il-SearchServer/mozi"
+WAZE_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; YallaMiklat/1.0)", "Referer": "https://www.waze.com/live-map"}
 
 # ─── МУНИЦИПАЛЬНЫЕ ArcGIS ENDPOINTS ────────────────────────────────────────
 # Каждый endpoint поддерживает spatial query (geometry + distance)
@@ -825,6 +826,77 @@ STATIC_SHELTERS = {
 }
 
 
+
+# ─── MIKLAT.CO.IL DATA (19,253 shelters nationwide) ─────────────────────────
+
+_MIKLAT_DATA = []       # [(lon, lat, addr, city), ...]
+_MIKLAT_GRID = {}       # (grid_lat, grid_lon) → [indices]
+_MIKLAT_GRID_SIZE = 0.01  # ~1.1km grid cells
+
+
+def _load_miklat_data():
+    """Загружает данные miklat.co.il из JSON файла при старте."""
+    global _MIKLAT_DATA, _MIKLAT_GRID
+    import os
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base = os.getcwd()
+    fpath = os.path.join(base, "miklat_shelters.json")
+    if not os.path.exists(fpath):
+        logger.warning("miklat_shelters.json not found — miklat.co.il source disabled")
+        return
+    try:
+        import json
+        with open(fpath, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        _MIKLAT_DATA = raw
+        # Строим пространственный индекс (grid)
+        for i, item in enumerate(raw):
+            lon, lat = item[0], item[1]
+            key = (round(lat / _MIKLAT_GRID_SIZE), round(lon / _MIKLAT_GRID_SIZE))
+            _MIKLAT_GRID.setdefault(key, []).append(i)
+        logger.info("miklat.co.il: loaded %d shelters, %d grid cells", len(raw), len(_MIKLAT_GRID))
+    except Exception as e:
+        logger.error("Failed to load miklat_shelters.json: %s", e)
+
+
+def fetch_shelters_miklat(lat, lon, radius_m=2000):
+    """Быстрый поиск по данным miklat.co.il (spatial grid, ~1ms)."""
+    if not _MIKLAT_DATA:
+        return []
+
+    # Ищем в соседних ячейках grid
+    delta = max(1, int(radius_m / 1100))  # кол-во ячеек по радиусу
+    center_gy = round(lat / _MIKLAT_GRID_SIZE)
+    center_gx = round(lon / _MIKLAT_GRID_SIZE)
+
+    shelters = []
+    for dy in range(-delta, delta + 1):
+        for dx in range(-delta, delta + 1):
+            key = (center_gy + dy, center_gx + dx)
+            for idx in _MIKLAT_GRID.get(key, []):
+                item = _MIKLAT_DATA[idx]
+                slon, slat = item[0], item[1]
+                dist = haversine(lat, lon, slat, slon)
+                if dist <= radius_m:
+                    addr = item[2] if len(item) > 2 else ""
+                    city = item[3] if len(item) > 3 else ""
+                    shelters.append({
+                        "id": f"mkl:{idx}",
+                        "lat": slat,
+                        "lon": slon,
+                        "address": addr or city or "מקלט ציבורי",
+                        "name": addr or "מקלט ציבורי",
+                        "type_raw": "bomb_shelter",
+                        "hours": "", "phone": "", "notes": "",
+                        "distance": round(dist),
+                        "source": "mkl",
+                    })
+    shelters.sort(key=lambda x: x["distance"])
+    return shelters
+
+
 def fetch_shelters_static(lat, lon, radius_m=5000):
     """Достаём убежища из статических данных (Google Maps KML)."""
     shelters = []
@@ -1278,7 +1350,7 @@ def _reverse_geocode_names_impl(lat, lon):
         r = requests.get(NOMINATIM_URL, params={
             "lat": lat, "lon": lon, "format": "json",
             "zoom": 14, "accept-language": "he",
-        }, headers={"User-Agent": "YallaMiklat/1.0"}, timeout=5)
+        }, headers={"User-Agent": "YallaMiklat/1.0"}, timeout=3)
         r.raise_for_status()
         addr = r.json().get("address", {})
 
@@ -1490,7 +1562,7 @@ def fetch_shelters_osm(lat, lon, radius_m=None):
     """
 
     try:
-        r = requests.post(OVERPASS_URL, data={"data": query}, timeout=10)
+        r = requests.post(OVERPASS_URL, data={"data": query}, timeout=5)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -1560,40 +1632,6 @@ def parse_shelter_arcgis(feat, ulat, ulon):
     }
 
 
-def _parse_arcgis_features(data, lat, lon):
-    """Парсит features из ArcGIS TA ответа."""
-    shelters = []
-    if not data or "features" not in data:
-        return shelters
-    for feat in data["features"]:
-        geom = feat.get("geometry", {})
-        attrs = feat.get("attributes", {})
-        slat = geom.get("y")
-        slon = geom.get("x")
-        if not slat or not slon:
-            continue
-        addr_parts = []
-        for f in ("שם_רחוב", "street_name", "address", "כתובת"):
-            if attrs.get(f):
-                addr_parts.append(str(attrs[f]))
-                break
-        for f in ("מספר_בית", "house_number", "מספר"):
-            if attrs.get(f):
-                addr_parts.append(str(attrs[f]))
-                break
-        address = " ".join(addr_parts) or "מקלט ציבורי"
-        dist = haversine(lat, lon, slat, slon)
-        shelters.append({
-            "id":       f"ta:{attrs.get('OBJECTID', '')}",
-            "lat":      slat, "lon": slon,
-            "address":  address,
-            "name":     attrs.get("name", attrs.get("שם", address)),
-            "type_raw": attrs.get("type", "bomb_shelter"),
-            "hours":    "", "phone": "", "notes": "",
-            "distance": round(dist),
-            "source":   "ta",
-        })
-    return shelters
 
 
 def fetch_shelters_arcgis(lat, lon):
@@ -1768,7 +1806,7 @@ def _fetch_user_shelters_sync(lat, lon, radius_m):
 def deduplicate_shelters(shelters, threshold_m=50):
     """Убираем дубли — если два убежища ближе threshold_m друг к другу, берём с большим приоритетом."""
     # Приоритет: ta > muni > gov > user > osm
-    priority = {"ta": 6, "muni": 5, "gov": 4, "kml": 3, "user": 2, "osm": 1}
+    priority = {"ta": 7, "muni": 6, "gov": 5, "waze": 4, "mkl": 3, "kml": 3, "user": 2, "osm": 1}
     result = []
     for s in shelters:
         is_dup = False
@@ -1857,17 +1895,53 @@ def fetch_shelters(lat, lon):
 
 
 
-# ─── ASYNC HTTP ──────────────────────────────────────────────────────────────
-
-_aio_session: aiohttp.ClientSession | None = None
 
 
-async def _get_aio() -> aiohttp.ClientSession:
-    global _aio_session
-    if _aio_session is None or _aio_session.closed:
-        timeout = aiohttp.ClientTimeout(total=8, connect=4)
-        _aio_session = aiohttp.ClientSession(timeout=timeout)
-    return _aio_session
+# ─── WAZE ────────────────────────────────────────────────────────────────────
+
+def fetch_shelters_waze(lat, lon, radius_m=2000):
+    """Ищем убежища через Waze search API — покрывает ВСЮ страну включая Иерусалим, Б-Ш, РЛЦ."""
+    try:
+        r = requests.get(WAZE_SEARCH_URL, params={
+            "q": "מקלט", "lang": "he",
+            "lon": lon, "lat": lat,
+            "origin": "livemap", "count": 50,
+        }, headers=WAZE_HEADERS, timeout=4)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.warning("Waze search error: %s", e)
+        return []
+
+    shelters = []
+    for item in data:
+        loc = item.get("location", {})
+        slat = loc.get("lat")
+        slon = loc.get("lon")
+        if not slat or not slon:
+            continue
+        dist = haversine(lat, lon, slat, slon)
+        if dist > radius_m:
+            continue
+        name = item.get("name", "מקלט")
+        city = item.get("city", "")
+        street = item.get("street") or ""
+        addr = f"{name}, {city}" if not street else f"{street}, {city}"
+        shelters.append({
+            "id":       f"waze:{slat:.6f},{slon:.6f}",
+            "lat":      slat,
+            "lon":      slon,
+            "address":  addr,
+            "name":     name,
+            "type_raw": "bomb_shelter",
+            "hours":    "", "phone": "", "notes": "",
+            "distance": round(dist),
+            "source":   "waze",
+        })
+    logger.info("Waze: found %d shelters (r=%dm)", len(shelters), radius_m)
+    return shelters
+
+# ─── ПАРАЛЛЕЛЬНЫЙ ПОИСК (asyncio.to_thread + requests) ───────────────────────
 
 
 async def fetch_shelters_municipal_async(lat, lon, radius_m=5000):
@@ -1876,48 +1950,44 @@ async def fetch_shelters_municipal_async(lat, lon, radius_m=5000):
     if not relevant:
         return []
 
-    session = await _get_aio()
-    params_base = {
-        "where": "1=1",
-        "geometry": f"{lon},{lat}",
-        "geometryType": "esriGeometryPoint",
-        "inSR": "4326",
-        "spatialRel": "esriSpatialRelIntersects",
-        "distance": radius_m,
-        "units": "esriSRUnit_Meter",
-        "outFields": "*",
-        "outSR": "4326",
-        "returnGeometry": "true",
-        "f": "json",
-        "resultRecordCount": 100,
-    }
-
     async def _query_one(ep):
-        try:
-            async with session.get(ep["url"] + "/query", params=params_base) as resp:
-                data = await resp.json(content_type=None)
-            if "error" in data:
+        def _sync():
+            params = {
+                "where": "1=1",
+                "geometry": f"{lon},{lat}",
+                "geometryType": "esriGeometryPoint",
+                "inSR": "4326",
+                "spatialRel": "esriSpatialRelIntersects",
+                "distance": radius_m,
+                "units": "esriSRUnit_Meter",
+                "outFields": "*",
+                "outSR": "4326",
+                "returnGeometry": "true",
+                "f": "json",
+                "resultRecordCount": 100,
+            }
+            try:
+                r = requests.get(ep["url"] + "/query", params=params, timeout=8)
+                data = r.json()
+                if "error" in data:
+                    return []
+                return [s for feat in data.get("features", [])
+                        if (s := _parse_municipal_feature(feat, lat, lon, ep["name"]))
+                        and s["distance"] <= radius_m]
+            except Exception:
                 return []
-            shelters = []
-            for feat in data.get("features", []):
-                s = _parse_municipal_feature(feat, lat, lon, ep["name"])
-                if s and s["distance"] <= radius_m:
-                    shelters.append(s)
-            return shelters
-        except Exception:
-            return []
+        return await asyncio.to_thread(_sync)
 
     results = await asyncio.gather(*[_query_one(ep) for ep in relevant])
     return [s for batch in results for s in batch]
 
 
 async def fetch_shelters_govmap_async(lat, lon, radius_m=5000):
-    """Асинхронный GovMap: reverse-geocode + параллельные поисковые запросы."""
+    """Асинхронный GovMap через threadpool."""
     global _govmap_broken, _govmap_fails
     if _itm_to_wgs is None or _govmap_broken:
         return []
 
-    # Reverse geocode (sync, быстрый — Nominatim)
     place_names = await asyncio.to_thread(reverse_geocode_names, lat, lon)
     if not place_names:
         return []
@@ -1942,43 +2012,29 @@ async def fetch_shelters_govmap_async(lat, lon, radius_m=5000):
             cities_to_fetch.append(city)
 
     if not cities_to_fetch:
-        # Всё в кэше
         return _filter_by_radius(all_cached, lat, lon, radius_m)
 
-    session = await _get_aio()
-
+    # Параллельные запросы
     async def _search_one(query_text):
-        try:
-            async with session.post(GOVMAP_SEARCH_URL,
+        def _sync():
+            try:
+                r = requests.post(GOVMAP_SEARCH_URL,
                     json={"keyword": query_text, "type": "all"},
-                    headers={"Content-Type": "application/json"}) as resp:
-                data = await resp.json(content_type=None)
-            return (data.get("data") or {}).get("Result", [])
-        except Exception:
-            return []
+                    headers={"Content-Type": "application/json"}, timeout=8)
+                return (r.json().get("data") or {}).get("Result", [])
+            except Exception:
+                return []
+        return await asyncio.to_thread(_sync)
 
-    # Если всё пусто — трекаем ошибки
-    async def _track_govmap_results(results_list):
-        global _govmap_broken, _govmap_fails
-        total = sum(len(r) for r in results_list)
-        if total == 0:
-            _govmap_fails += 1
-            if _govmap_fails >= 3:
-                _govmap_broken = True
-                logger.warning("GovMap: disabled after %d consecutive failures", _govmap_fails)
-        else:
-            _govmap_fails = 0
-
-    # Генерируем все запросы разом
     tasks = []
     for city in cities_to_fetch:
-        for prefix in ["מקלט", "מקלט ציבורי"]:  # 2 самых эффективных паттерна
+        for prefix in ["מקלט", "מקלט ציבורי"]:
             tasks.append((city, _search_one(f"{prefix} {city}")))
 
     results = await asyncio.gather(*[t[1] for t in tasks])
 
-    # Парсим результаты
     city_data = {c: {} for c in cities_to_fetch}
+    total_found = 0
     for (city, _), items in zip(tasks, results):
         for item in items:
             oid = item.get("ObjectID")
@@ -2000,10 +2056,19 @@ async def fetch_shelters_govmap_async(lat, lon, radius_m=5000):
                 "type_raw": "bomb_shelter", "hours": "", "phone": "",
                 "notes": "", "source": "gov",
             }
+            total_found += 1
 
     for city, shelters in city_data.items():
         _govmap_cache[city] = shelters
         all_cached.update(shelters)
+
+    if total_found == 0:
+        _govmap_fails += 1
+        if _govmap_fails >= 3:
+            _govmap_broken = True
+            logger.warning("GovMap: disabled after %d failures", _govmap_fails)
+    else:
+        _govmap_fails = 0
 
     return _filter_by_radius(all_cached, lat, lon, radius_m)
 
@@ -2021,141 +2086,77 @@ def _filter_by_radius(cached, lat, lon, radius_m):
 
 
 async def fetch_shelters_osm_async(lat, lon, radius_m=2000):
-    """Асинхронный Overpass API."""
-    session = await _get_aio()
-    delta = radius_m / 111000 * 1.2
-    bbox = f"{lat-delta},{lon-delta},{lat+delta},{lon+delta}"
-    query = f"""[out:json][timeout:10];(
-      nwr["amenity"="shelter"]["shelter_type"="bomb_shelter"]({bbox});
-      nwr["military"="bunker"]({bbox});
-      nwr["building"="bunker"]({bbox});
-      nwr["bunker_type"="bomb_shelter"]({bbox});
-      nwr["amenity"="shelter"]["name"~"מקלט"]({bbox});
-      nwr["name"~"^מקלט"]["building"]({bbox});
-    );out center;"""
-    try:
-        async with session.post(OVERPASS_URL, data={"data": query}) as resp:
-            data = await resp.json(content_type=None)
-    except Exception:
-        return []
-
-    shelters = []
-    for el in data.get("elements", []):
-        slat = el.get("lat") or (el.get("center", {}).get("lat"))
-        slon = el.get("lon") or (el.get("center", {}).get("lon"))
-        if not slat or not slon:
-            continue
-        tags = el.get("tags", {})
-        name = tags.get("name", tags.get("description", ""))
-        addr = tags.get("addr:street", "")
-        if tags.get("addr:housenumber"):
-            addr += " " + tags["addr:housenumber"]
-        dist = haversine(lat, lon, slat, slon)
-        if dist <= radius_m:
-            shelters.append({
-                "id": f"osm:{el.get('type','n')[0]}{el.get('id',0)}",
-                "lat": slat, "lon": slon,
-                "address": addr or name or "מקלט",
-                "name": name or "מקלט",
-                "type_raw": tags.get("shelter_type", "bomb_shelter"),
-                "hours": tags.get("opening_hours", ""),
-                "phone": tags.get("phone", ""),
-                "notes": tags.get("note", ""),
-                "distance": round(dist),
-                "source": "osm",
-            })
-    return shelters
+    """OSM Overpass в отдельном потоке."""
+    return await asyncio.to_thread(fetch_shelters_osm, lat, lon, radius_m)
 
 
 async def fetch_shelters_ta_async(lat, lon):
-    """Асинхронный ArcGIS Тель-Авив."""
+    """TA ArcGIS в отдельном потоке."""
     if not is_in_tel_aviv(lat, lon):
         return []
-    session = await _get_aio()
-    params = {
-        "where": "1=1",
-        "geometry": f"{lon},{lat}",
-        "geometryType": "esriGeometryPoint",
-        "inSR": "4326",
-        "spatialRel": "esriSpatialRelIntersects",
-        "distance": SEARCH_RADIUS_M,
-        "units": "esriSRUnit_Meter",
-        "outFields": "*",
-        "outSR": "4326",
-        "returnGeometry": "true",
-        "f": "json",
-        "resultRecordCount": 50,
-    }
-    try:
-        async with session.get(ARCGIS_URL, params=params) as resp:
-            data = await resp.json(content_type=None)
-        shelters = _parse_arcgis_features(data, lat, lon)
-        if len(shelters) < 3:
-            params["distance"] = 5000
-            async with session.get(ARCGIS_URL, params=params) as resp:
-                data2 = await resp.json(content_type=None)
-            shelters = _parse_arcgis_features(data2, lat, lon)
-        return shelters
-    except Exception:
-        return []
+    return await asyncio.to_thread(fetch_shelters_arcgis, lat, lon)
 
 
 async def fetch_shelters_all_async(lat, lon):
-    """Главная асинхронная функция: все источники параллельно."""
+    """Главная функция: ВСЕ источники параллельно через asyncio.gather."""
     base_radius = SEARCH_RADIUS_M
-
-    # Запускаем ВСЕ источники одновременно
-    muni_task = fetch_shelters_municipal_async(lat, lon, radius_m=5000)
-    gov_task  = fetch_shelters_govmap_async(lat, lon, radius_m=5000)
-    osm_task  = fetch_shelters_osm_async(lat, lon, radius_m=base_radius)
-    ta_task   = fetch_shelters_ta_async(lat, lon)
-    user_task = fetch_user_shelters(lat, lon, radius_m=5000)
 
     try:
         results = await asyncio.wait_for(
             asyncio.gather(
-                muni_task, gov_task, osm_task, ta_task, user_task,
+                fetch_shelters_municipal_async(lat, lon, radius_m=5000),
+                fetch_shelters_govmap_async(lat, lon, radius_m=5000),
+                fetch_shelters_osm_async(lat, lon, radius_m=base_radius),
+                fetch_shelters_ta_async(lat, lon),
+                fetch_user_shelters(lat, lon, radius_m=5000),
+                asyncio.to_thread(fetch_shelters_waze, lat, lon, 5000),
                 return_exceptions=True,
             ),
             timeout=10.0,
         )
     except asyncio.TimeoutError:
-        logger.warning("fetch_shelters_all_async: overall timeout (10s)")
-        results = [[], [], [], [], []]
+        logger.warning("fetch_shelters_all_async: overall timeout (12s)")
+        results = [[], [], [], [], [], []]
 
     shelters_muni = results[0] if not isinstance(results[0], Exception) else []
     shelters_gov  = results[1] if not isinstance(results[1], Exception) else []
     shelters_osm  = results[2] if not isinstance(results[2], Exception) else []
     shelters_ta   = results[3] if not isinstance(results[3], Exception) else []
     shelters_user = results[4] if not isinstance(results[4], Exception) else []
+    shelters_waze = results[5] if not isinstance(results[5], Exception) else []
 
     # KML — мгновенно (in-memory)
     shelters_kml = fetch_shelters_static(lat, lon, radius_m=5000)
 
-    # Фильтруем по базовому радиусу
+    # miklat.co.il — мгновенно (in-memory grid index)
+    shelters_mkl = fetch_shelters_miklat(lat, lon, radius_m=5000)
+
     muni_near = [s for s in shelters_muni if s["distance"] <= base_radius]
     gov_near  = [s for s in shelters_gov  if s["distance"] <= base_radius + 1000]
+    waze_near = [s for s in shelters_waze if s["distance"] <= base_radius]
     kml_near  = [s for s in shelters_kml  if s["distance"] <= base_radius]
+    mkl_near  = [s for s in shelters_mkl  if s["distance"] <= base_radius]
     user_near = [s for s in shelters_user if s["distance"] <= base_radius]
 
-    logger.info("Async fetch: muni=%d gov=%d osm=%d ta=%d kml=%d user=%d",
-                len(muni_near), len(gov_near), len(shelters_osm),
-                len(shelters_ta), len(kml_near), len(user_near))
+    logger.info("Async: muni=%d gov=%d waze=%d osm=%d ta=%d kml=%d mkl=%d user=%d",
+                len(muni_near), len(gov_near), len(waze_near), len(shelters_osm),
+                len(shelters_ta), len(kml_near), len(mkl_near), len(user_near))
 
-    all_shelters = shelters_ta + muni_near + gov_near + kml_near + user_near + shelters_osm
+    all_shelters = shelters_ta + muni_near + gov_near + waze_near + kml_near + mkl_near + user_near + shelters_osm
     all_shelters = deduplicate_shelters(all_shelters)
 
-    # Расширяем если мало
     for expanded_r in (3000, 5000):
         if len(all_shelters) >= 3:
             break
-        logger.info("Expanding radius to %dm (have %d)", expanded_r, len(all_shelters))
-        osm_ext = await fetch_shelters_osm_async(lat, lon, radius_m=expanded_r)
+        logger.info("Expanding to %dm (have %d)", expanded_r, len(all_shelters))
+        osm_ext  = await asyncio.to_thread(fetch_shelters_osm, lat, lon, expanded_r)
         gov_ext  = [s for s in shelters_gov  if s["distance"] <= expanded_r]
         muni_ext = [s for s in shelters_muni if s["distance"] <= expanded_r]
+        waze_ext = [s for s in shelters_waze if s["distance"] <= expanded_r]
         kml_ext  = [s for s in shelters_kml  if s["distance"] <= expanded_r]
+        mkl_ext  = [s for s in shelters_mkl  if s["distance"] <= expanded_r]
         user_ext = [s for s in shelters_user if s["distance"] <= expanded_r]
-        extra = shelters_ta + muni_ext + gov_ext + kml_ext + user_ext + osm_ext
+        extra = shelters_ta + muni_ext + gov_ext + waze_ext + kml_ext + mkl_ext + user_ext + osm_ext
         all_shelters = deduplicate_shelters(extra)
 
     all_shelters.sort(key=lambda x: x["distance"])
@@ -2326,7 +2327,7 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         map_buf = await asyncio.to_thread(generate_map, lat, lon, shelters)
         caption_lines = [t(ctx, "map_legend") + "\n"]
         for i, s in enumerate(shelters, 1):
-            src = {"ta": "🟢", "gov": "🏛️", "osm": "🌐"}.get(s["source"], "")
+            src = {"ta": "🟢", "muni": "🏛️", "gov": "🏛️", "waze": "🚗", "kml": "📍", "mkl": "📍", "osm": "🌐", "user": "👥"}.get(s["source"], "")
             caption_lines.append(f"#{i} {s['address']} — {s['distance']} {dist_unit} {src}")
         await update.message.reply_photo(
             photo=map_buf,
@@ -2710,6 +2711,7 @@ def main():
     except Exception as e:
         logger.error("DB init failed: %s", e)
 
+    _load_miklat_data()
     app = Application.builder().token(BOT_TOKEN).build()
 
     review_conv = ConversationHandler(
