@@ -834,31 +834,78 @@ _MIKLAT_GRID = {}       # (grid_lat, grid_lon) → [indices]
 _MIKLAT_GRID_SIZE = 0.01  # ~1.1km grid cells
 
 
+def _download_miklat_data(fpath):
+    """Скачивает данные с miklat.co.il и сохраняет локально."""
+    import json as _json
+    try:
+        logger.info("Downloading shelter data from miklat.co.il ...")
+        r_lite = requests.get("https://miklat.co.il/data/shelters-lite.json",
+                              headers={"User-Agent": "YallaMiklat/1.0"}, timeout=15)
+        r_lite.raise_for_status()
+        lite = r_lite.json()
+
+        # Details (адреса, города) — необязательный
+        details = {}
+        try:
+            r_det = requests.get("https://miklat.co.il/data/shelters-details.json",
+                                 headers={"User-Agent": "YallaMiklat/1.0"}, timeout=15)
+            r_det.raise_for_status()
+            details = r_det.json()
+        except Exception:
+            pass
+
+        # Merge: [lon, lat, addr?, city?]
+        merged = []
+        for i, item in enumerate(lite):
+            entry = [item[0], item[1]]  # lon, lat
+            det = details.get(str(i), {})
+            if det.get("a") or det.get("c"):
+                entry.append(det.get("a", ""))
+                entry.append(det.get("c", ""))
+            merged.append(entry)
+
+        with open(fpath, "w", encoding="utf-8") as f:
+            _json.dump(merged, f, ensure_ascii=False, separators=(",", ":"))
+        logger.info("miklat.co.il: downloaded %d shelters → %s", len(merged), fpath)
+        return merged
+    except Exception as e:
+        logger.error("Failed to download miklat.co.il data: %s", e)
+        return None
+
+
 def _load_miklat_data():
-    """Загружает данные miklat.co.il из JSON файла при старте."""
+    """Загружает данные miklat.co.il: из файла или скачивает с сайта."""
     global _MIKLAT_DATA, _MIKLAT_GRID
-    import os
+    import os, json as _json
     try:
         base = os.path.dirname(os.path.abspath(__file__))
     except NameError:
         base = os.getcwd()
     fpath = os.path.join(base, "miklat_shelters.json")
-    if not os.path.exists(fpath):
-        logger.warning("miklat_shelters.json not found — miklat.co.il source disabled")
+
+    raw = None
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                raw = _json.load(f)
+            logger.info("miklat.co.il: loaded %d shelters from cache", len(raw))
+        except Exception:
+            raw = None
+
+    if not raw:
+        raw = _download_miklat_data(fpath)
+
+    if not raw:
+        logger.warning("miklat.co.il source disabled (no data)")
         return
-    try:
-        import json
-        with open(fpath, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        _MIKLAT_DATA = raw
-        # Строим пространственный индекс (grid)
-        for i, item in enumerate(raw):
-            lon, lat = item[0], item[1]
-            key = (round(lat / _MIKLAT_GRID_SIZE), round(lon / _MIKLAT_GRID_SIZE))
-            _MIKLAT_GRID.setdefault(key, []).append(i)
-        logger.info("miklat.co.il: loaded %d shelters, %d grid cells", len(raw), len(_MIKLAT_GRID))
-    except Exception as e:
-        logger.error("Failed to load miklat_shelters.json: %s", e)
+
+    _MIKLAT_DATA = raw
+    # Строим пространственный индекс (grid)
+    for i, item in enumerate(raw):
+        lon, lat = item[0], item[1]
+        key = (round(lat / _MIKLAT_GRID_SIZE), round(lon / _MIKLAT_GRID_SIZE))
+        _MIKLAT_GRID.setdefault(key, []).append(i)
+    logger.info("miklat.co.il: %d shelters indexed in %d grid cells", len(raw), len(_MIKLAT_GRID))
 
 
 def fetch_shelters_miklat(lat, lon, radius_m=2000):
