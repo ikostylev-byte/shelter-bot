@@ -2646,6 +2646,122 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"👥 User-reported shelters: {ucnt}")
     except Exception as e:
         await update.message.reply_text(f"👥 User shelters: DB unavailable")
+    # miklat.co.il static data
+    await update.message.reply_text(f"🗺 miklat.co.il: {len(_MIKLAT_DATA)} shelters, {len(_MIKLAT_GRID)} grid cells")
+    # KML static data
+    kml_total = sum(len(v) for v in STATIC_SHELTERS.values())
+    await update.message.reply_text(f"📍 KML: {kml_total} shelters in {len(STATIC_SHELTERS)} cities")
+    # Waze
+    try:
+        r = requests.get(WAZE_SEARCH_URL, params={
+            "q": "מקלט", "lang": "he", "lon": 34.78, "lat": 32.08,
+            "origin": "livemap", "count": 10,
+        }, headers=WAZE_HEADERS, timeout=5)
+        await update.message.reply_text(f"🚗 Waze: {len(r.json())} results (test query)")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Waze: {e}")
+    # GovMap circuit breaker
+    status = "🔴 disabled" if _govmap_broken else f"🟢 active (fails: {_govmap_fails})"
+    await update.message.reply_text(f"🏛️ GovMap circuit: {status}")
+
+
+async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Диагностика: /diag lat,lon или /diag + отправка локации."""
+    import time as _time
+
+    text = update.message.text or ""
+    parts = text.replace("/diag", "").strip().replace(" ", ",").split(",")
+    lat = lon = None
+    if len(parts) >= 2:
+        try:
+            lat, lon = float(parts[0]), float(parts[1])
+        except ValueError:
+            pass
+
+    if lat is None:
+        # Стандартная точка — центр ТА
+        lat, lon = 32.0853, 34.7818
+        await update.message.reply_text(
+            "🔍 *Диагностика* (ТА центр 32.085, 34.782)\n"
+            "Подсказка: `/diag 31.768,35.214` для другой точки",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    msg_lines = [f"📍 *Диагностика {lat:.4f}, {lon:.4f}*\n"]
+
+    # 1. miklat.co.il (instant)
+    t0 = _time.time()
+    mkl_results = fetch_shelters_miklat(lat, lon, radius_m=2000)
+    mkl_time = (_time.time() - t0) * 1000
+    nearest_mkl = f"{mkl_results[0]['distance']}м" if mkl_results else "—"
+    msg_lines.append(f"🗺 miklat.co.il: {len(mkl_results)} ≤2км ({mkl_time:.0f}мс) ближ: {nearest_mkl}")
+
+    # 2. KML (instant)
+    t0 = _time.time()
+    kml_results = fetch_shelters_static(lat, lon, radius_m=2000)
+    kml_time = (_time.time() - t0) * 1000
+    nearest_kml = f"{kml_results[0]['distance']}м" if kml_results else "—"
+    msg_lines.append(f"📍 KML: {len(kml_results)} ≤2км ({kml_time:.0f}мс) ближ: {nearest_kml}")
+
+    # 3. Waze
+    t0 = _time.time()
+    waze_results = await asyncio.to_thread(fetch_shelters_waze, lat, lon, 2000)
+    waze_time = (_time.time() - t0) * 1000
+    nearest_wz = f"{waze_results[0]['distance']}м" if waze_results else "—"
+    msg_lines.append(f"🚗 Waze: {len(waze_results)} ≤2км ({waze_time:.0f}мс) ближ: {nearest_wz}")
+
+    # 4. Municipal ArcGIS
+    t0 = _time.time()
+    muni_results = await fetch_shelters_municipal_async(lat, lon, radius_m=2000)
+    muni_time = (_time.time() - t0) * 1000
+    nearest_muni = f"{muni_results[0]['distance']}м" if muni_results else "—"
+    msg_lines.append(f"🏛️ Municipal: {len(muni_results)} ≤2км ({muni_time:.0f}мс) ближ: {nearest_muni}")
+
+    # 5. GovMap
+    t0 = _time.time()
+    gov_results = await fetch_shelters_govmap_async(lat, lon, radius_m=2000)
+    gov_time = (_time.time() - t0) * 1000
+    nearest_gov = f"{gov_results[0]['distance']}м" if gov_results else "—"
+    gov_flag = " ⚠️ disabled" if _govmap_broken else ""
+    msg_lines.append(f"🏛️ GovMap: {len(gov_results)} ≤2км ({gov_time:.0f}мс) ближ: {nearest_gov}{gov_flag}")
+
+    # 6. TA ArcGIS
+    if is_in_tel_aviv(lat, lon):
+        t0 = _time.time()
+        ta_results = await fetch_shelters_ta_async(lat, lon)
+        ta_time = (_time.time() - t0) * 1000
+        nearest_ta = f"{ta_results[0]['distance']}м" if ta_results else "—"
+        msg_lines.append(f"🟢 TA GIS: {len(ta_results)} ({ta_time:.0f}мс) ближ: {nearest_ta}")
+    else:
+        msg_lines.append(f"🟢 TA GIS: — (не в ТА)")
+
+    # 7. OSM
+    t0 = _time.time()
+    osm_results = await fetch_shelters_osm_async(lat, lon, radius_m=2000)
+    osm_time = (_time.time() - t0) * 1000
+    nearest_osm = f"{osm_results[0]['distance']}м" if osm_results else "—"
+    msg_lines.append(f"🌐 OSM: {len(osm_results)} ≤2км ({osm_time:.0f}мс) ближ: {nearest_osm}")
+
+    # Summary
+    total_raw = len(mkl_results) + len(kml_results) + len(waze_results) + len(muni_results) + len(gov_results) + len(osm_results)
+    msg_lines.append(f"\n📊 *Итого raw*: {total_raw}")
+
+    # Full pipeline
+    t0 = _time.time()
+    async def fake_user(lat, lon, radius_m=2000):
+        return []
+    old_fn = globals().get("fetch_user_shelters")
+    pipeline = await fetch_shelters_all_async(lat, lon)
+    pipe_time = (_time.time() - t0) * 1000
+    src_counts = {}
+    for s in pipeline:
+        src_counts[s["source"]] = src_counts.get(s["source"], 0) + 1
+    src_str = " ".join(f"{k}={v}" for k, v in sorted(src_counts.items()))
+    nearest_pipe = f"{pipeline[0]['distance']}м {pipeline[0]['address'][:25]}" if pipeline else "НЕТ ⚠️"
+    msg_lines.append(f"🔧 *Pipeline*: {len(pipeline)} ({pipe_time:.0f}мс) [{src_str}]")
+    msg_lines.append(f"🏆 *Ближайший*: {nearest_pipe}")
+
+    await update.message.reply_text("\n".join(msg_lines), parse_mode=ParseMode.MARKDOWN)
 
 
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2791,6 +2907,7 @@ def main():
     app.add_handler(report_conv)
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("ping",   cmd_ping))
+    app.add_handler(CommandHandler("diag",   cmd_diag))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("lang",   cmd_lang))
     app.add_handler(review_conv)
