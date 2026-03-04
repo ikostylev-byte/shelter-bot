@@ -62,6 +62,7 @@ _itm_to_wgs = True  # flag: ITM conversion available (always True now)
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
+MAP_URL      = os.environ.get("MAP_URL", "")  # URL to hosted shelter map (map.html)
 
 # ─── ИСТОЧНИКИ ДАННЫХ ────────────────────────────────────────────────────────
 # GovMap — государственный геопортал Израиля (POI слой, вся страна)
@@ -1133,6 +1134,7 @@ TEXTS = {
     "ru": {
         "searching": "⏳ Ищу ближайшие убежища...",
         "menu_report": "📝 Добавить миклат",
+        "menu_map":    "🗺 Карта",
         "menu_lang":   "🌐 Язык",
         "menu_help":   "❓ Помощь",
         "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~19,000 убежищ по стране",
@@ -1178,6 +1180,7 @@ TEXTS = {
     "he": {
         "searching": "⏳ מחפש מקלטים קרובים...",
         "menu_report": "📝 הוסף מקלט",
+        "menu_map":    "🗺 מפה",
         "menu_lang":   "🌐 שפה",
         "menu_help":   "❓ עזרה",
         "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~19,000 מקלטים",
@@ -1223,6 +1226,7 @@ TEXTS = {
     "en": {
         "searching": "⏳ Searching nearby shelters...",
         "menu_report": "📝 Add shelter",
+        "menu_map":    "🗺 Map",
         "menu_lang":   "🌐 Language",
         "menu_help":   "❓ Help",
         "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~19,000 shelters",
@@ -1281,7 +1285,8 @@ def get_location_kb(ctx):
     tx = TEXTS.get(lang, TEXTS["ru"])
     return ReplyKeyboardMarkup([
         [KeyboardButton(tx["send_loc"], request_location=True)],
-        [tx["menu_report"], tx["menu_lang"], tx["menu_help"]],
+        [tx["menu_report"], tx["menu_map"], tx["menu_help"]],
+        [tx["menu_lang"]],
     ], resize_keyboard=True, one_time_keyboard=False)
 
 
@@ -2949,6 +2954,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # NB: кнопка «Добавить миклат» обрабатывается через ConversationHandler (report_conv)
     lang_btns = {TEXTS[l].get("menu_lang", "") for l in TEXTS}
     help_btns = {TEXTS[l].get("menu_help", "") for l in TEXTS}
+    map_btns  = {TEXTS[l].get("menu_map", "") for l in TEXTS}
 
     if text in lang_btns:
         return await cmd_lang(update, ctx)
@@ -2957,6 +2963,18 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             t(ctx, "help_text"), parse_mode=ParseMode.MARKDOWN,
             reply_markup=get_location_kb(ctx))
+        return
+
+    if text in map_btns:
+        if MAP_URL:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗺 " + t(ctx, "menu_map"), url=MAP_URL)
+            ]])
+            msg = {"ru": "Карта всех убежищ:", "he": "מפת כל המקלטים:", "en": "All shelters map:"}
+            lang = (ctx.user_data or {}).get("lang", "ru")
+            await update.message.reply_text(msg.get(lang, msg["ru"]), reply_markup=kb)
+        else:
+            await update.message.reply_text("🗺 Map coming soon!", reply_markup=get_location_kb(ctx))
         return
 
     await update.message.reply_text(t(ctx, "send_loc_btn"), reply_markup=get_location_kb(ctx))

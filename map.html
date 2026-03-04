@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>יאללה מקלט! 🛡️ — מפת מקלטים</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css"/>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1; }
+
+  /* Top bar */
+  #topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+    background: rgba(255,255,255,0.95); backdrop-filter: blur(8px);
+    padding: 8px 12px; display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12); direction: ltr;
+  }
+  #topbar .logo { font-size: 18px; font-weight: 700; white-space: nowrap; }
+  #topbar .logo span { color: #2563eb; }
+  #counter {
+    font-size: 13px; color: #64748b; white-space: nowrap;
+    margin-right: auto;
+  }
+
+  /* Locate button */
+  #locate-btn {
+    position: fixed; bottom: 24px; right: 16px; z-index: 1000;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: #2563eb; color: white; border: none;
+    font-size: 24px; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(37,99,235,0.4);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.15s, box-shadow 0.15s;
+  }
+  #locate-btn:hover { transform: scale(1.08); box-shadow: 0 6px 16px rgba(37,99,235,0.5); }
+  #locate-btn:active { transform: scale(0.95); }
+  #locate-btn.loading { animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+
+  /* Info panel */
+  #info {
+    position: fixed; bottom: 0; left: 0; right: 0; z-index: 1000;
+    background: white; border-radius: 16px 16px 0 0;
+    box-shadow: 0 -4px 20px rgba(0,0,0,0.15);
+    padding: 16px 20px 24px; transform: translateY(100%);
+    transition: transform 0.3s ease; direction: rtl;
+    max-height: 50vh; overflow-y: auto;
+  }
+  #info.visible { transform: translateY(0); }
+  #info .handle { width: 36px; height: 4px; background: #cbd5e1; border-radius: 2px; margin: 0 auto 12px; }
+  #info .addr { font-size: 17px; font-weight: 600; color: #1e293b; margin-bottom: 4px; }
+  #info .meta { font-size: 14px; color: #64748b; margin-bottom: 8px; }
+  #info .dist { display: inline-block; background: #eff6ff; color: #2563eb; padding: 2px 8px; border-radius: 10px; font-size: 13px; font-weight: 600; }
+  #info .nav-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 10px; padding: 10px 18px;
+    background: #2563eb; color: white; border: none; border-radius: 10px;
+    font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none;
+  }
+  #info .nav-btn:hover { background: #1d4ed8; }
+  #info .close-btn {
+    position: absolute; top: 12px; left: 12px;
+    background: none; border: none; font-size: 22px; color: #94a3b8; cursor: pointer;
+  }
+
+  /* Cluster colors */
+  .marker-cluster-small { background-color: rgba(37,99,235,0.2); }
+  .marker-cluster-small div { background-color: rgba(37,99,235,0.6); color: white; }
+  .marker-cluster-medium { background-color: rgba(234,88,12,0.2); }
+  .marker-cluster-medium div { background-color: rgba(234,88,12,0.6); color: white; }
+  .marker-cluster-large { background-color: rgba(220,38,38,0.2); }
+  .marker-cluster-large div { background-color: rgba(220,38,38,0.6); color: white; }
+
+  /* Loading overlay */
+  #loading {
+    position: fixed; inset: 0; z-index: 2000;
+    background: white; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    transition: opacity 0.4s;
+  }
+  #loading.hide { opacity: 0; pointer-events: none; }
+  #loading .spinner { width: 40px; height: 40px; border: 3px solid #e2e8f0; border-top-color: #2563eb; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading p { font-size: 15px; color: #64748b; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p>טוען מקלטים...</p>
+</div>
+
+<div id="topbar">
+  <div class="logo">🛡️ <span>Yalla Miklat</span></div>
+  <div id="counter">—</div>
+</div>
+
+<div id="map"></div>
+
+<button id="locate-btn" title="המיקום שלי">📍</button>
+
+<div id="info">
+  <div class="handle"></div>
+  <button class="close-btn" onclick="closeInfo()">✕</button>
+  <div class="addr" id="info-addr"></div>
+  <div class="meta" id="info-meta"></div>
+  <div id="info-dist"></div>
+  <div id="info-nav"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
+<script>
+(function() {
+  // Config
+  const DATA_URL = "shelters.json";   // miklat_shelters.json format: [[lon,lat,addr,city],...]
+  const ISRAEL_CENTER = [31.5, 34.8];
+  const DEFAULT_ZOOM = 8;
+
+  // State
+  let map, markers, userLatLng = null, userMarker = null;
+  let allShelters = [];
+
+  // Init map
+  map = L.map("map", {
+    center: ISRAEL_CENTER, zoom: DEFAULT_ZOOM,
+    zoomControl: false, attributionControl: false,
+  });
+
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a> &copy; <a href="https://osm.org/">OSM</a>'
+  }).addTo(map);
+
+  L.control.zoom({ position: "topright" }).addTo(map);
+  L.control.attribution({ position: "bottomleft" }).addTo(map);
+
+  // Shelter icon
+  const shelterIcon = L.divIcon({
+    className: "",
+    html: '<div style="width:12px;height:12px;background:#2563eb;border:2px solid white;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,0.3)"></div>',
+    iconSize: [12, 12], iconAnchor: [6, 6],
+  });
+
+  // Marker cluster
+  markers = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    disableClusteringAtZoom: 17,
+    chunkedLoading: true,
+    chunkInterval: 100,
+    chunkDelay: 20,
+  });
+
+  // Haversine
+  function dist(lat1, lon1, lat2, lon2) {
+    const R = 6371000, rad = Math.PI / 180;
+    const dLat = (lat2 - lat1) * rad, dLon = (lon2 - lon1) * rad;
+    const a = Math.sin(dLat/2)**2 + Math.cos(lat1*rad) * Math.cos(lat2*rad) * Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+
+  function fmtDist(m) {
+    return m < 1000 ? Math.round(m) + " מ׳" : (m/1000).toFixed(1) + " ק״מ";
+  }
+
+  // Load data
+  fetch(DATA_URL)
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(data => {
+      allShelters = data;
+      const layerList = [];
+      data.forEach((s, i) => {
+        const lat = s[1], lon = s[0];
+        if (!lat || !lon) return;
+        const addr = s[2] || "";
+        const city = s[3] || "";
+        const m = L.marker([lat, lon], { icon: shelterIcon });
+        m._shelterIdx = i;
+        m.on("click", () => showInfo(i));
+        layerList.push(m);
+      });
+      markers.addLayers(layerList);
+      map.addLayer(markers);
+      document.getElementById("counter").textContent = data.length.toLocaleString() + " מקלטים";
+      document.getElementById("loading").classList.add("hide");
+      // Auto-locate
+      locateUser();
+    })
+    .catch(err => {
+      document.getElementById("loading").innerHTML =
+        '<p style="color:#dc2626">❌ שגיאה בטעינת נתונים</p><p style="font-size:13px;color:#94a3b8">' + err.message + '</p>';
+    });
+
+  // Show info panel
+  function showInfo(idx) {
+    const s = allShelters[idx];
+    const lat = s[1], lon = s[0];
+    const addr = s[2] || "מקלט ציבורי";
+    const city = s[3] || "";
+
+    document.getElementById("info-addr").textContent = addr || "מקלט ציבורי";
+    document.getElementById("info-meta").textContent = city;
+
+    if (userLatLng) {
+      const d = dist(userLatLng.lat, userLatLng.lng, lat, lon);
+      document.getElementById("info-dist").innerHTML = '<span class="dist">' + fmtDist(d) + '</span>';
+    } else {
+      document.getElementById("info-dist").innerHTML = "";
+    }
+
+    const navUrl = "https://www.google.com/maps/dir/?api=1&destination=" + lat + "," + lon + "&travelmode=walking";
+    document.getElementById("info-nav").innerHTML =
+      '<a class="nav-btn" href="' + navUrl + '" target="_blank">🧭 ניווט</a>';
+
+    document.getElementById("info").classList.add("visible");
+    map.panTo([lat, lon]);
+  }
+
+  window.closeInfo = function() {
+    document.getElementById("info").classList.remove("visible");
+  };
+
+  // Close info on map click
+  map.on("click", () => closeInfo());
+
+  // Locate user
+  function locateUser() {
+    if (!navigator.geolocation) return;
+    const btn = document.getElementById("locate-btn");
+    btn.classList.add("loading");
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        btn.classList.remove("loading");
+        userLatLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        if (userMarker) map.removeLayer(userMarker);
+        userMarker = L.circleMarker([userLatLng.lat, userLatLng.lng], {
+          radius: 8, fillColor: "#2563eb", fillOpacity: 1,
+          color: "white", weight: 3,
+        }).addTo(map);
+        // Add accuracy circle
+        L.circle([userLatLng.lat, userLatLng.lng], {
+          radius: pos.coords.accuracy, fillColor: "#2563eb",
+          fillOpacity: 0.08, stroke: false,
+        }).addTo(map);
+        map.setView([userLatLng.lat, userLatLng.lng], 15);
+      },
+      () => { btn.classList.remove("loading"); },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  }
+
+  document.getElementById("locate-btn").addEventListener("click", locateUser);
+
+  // Swipe-to-close info panel
+  let touchStart = 0;
+  const info = document.getElementById("info");
+  info.addEventListener("touchstart", e => { touchStart = e.touches[0].clientY; });
+  info.addEventListener("touchmove", e => {
+    const dy = e.touches[0].clientY - touchStart;
+    if (dy > 60) closeInfo();
+  });
+})();
+</script>
+</body>
+</html>
