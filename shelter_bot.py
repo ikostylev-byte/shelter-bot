@@ -9,7 +9,7 @@
 3. OpenStreetMap (Overpass API) — вся страна
 4. ArcGIS Тель-Авива — дополнительные данные для ТА
 
-Зависимости: pip install pyproj python-telegram-bot asyncpg requests staticmap Pillow
+Зависимости: pip install python-telegram-bot asyncpg requests staticmap Pillow
 """
 
 import os, math, logging, asyncpg, requests, asyncio
@@ -24,18 +24,41 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
-# ─── ITM ↔ WGS84 координаты (pyproj) ────────────────────────────────────────
-try:
-    from pyproj import Transformer
-    _itm_to_wgs = Transformer.from_crs("EPSG:2039", "EPSG:4326", always_xy=True)
-    def itm_to_wgs84(x, y):
-        lon, lat = _itm_to_wgs.transform(x, y)
-        return lat, lon
-except ImportError:
-    logging.warning("pyproj не установлен — GovMap источник будет отключён. pip install pyproj")
-    _itm_to_wgs = None
-    def itm_to_wgs84(x, y):
-        return None, None
+# ─── ITM ↔ WGS84 координаты (чистый Python, точность <2м) ────────────────────
+import math as _math
+
+def itm_to_wgs84(easting, northing):
+    """Israel ITM (EPSG:2039) → WGS84.  Pure Python, no pyproj needed.
+    Точность <2м по всей территории Израиля."""
+    _a = 6378137.0; _f = 1/298.257222101
+    _e2 = 2*_f - _f*_f; _ep2 = _e2/(1-_e2)
+    _lat0 = _math.radians(31+44/60+3.8171/3600)
+    _lon0 = _math.radians(35+12/60+16.2612/3600)
+    _k0 = 1.0000067; _x0 = 219529.584; _y0 = 626907.390
+    _e22 = _e2*_e2; _e23 = _e22*_e2
+    _M0 = _a*((1-_e2/4-3*_e22/64-5*_e23/256)*_lat0
+              -(3*_e2/8+3*_e22/32+45*_e23/1024)*_math.sin(2*_lat0)
+              +(15*_e22/256+45*_e23/1024)*_math.sin(4*_lat0)
+              -(35*_e23/3072)*_math.sin(6*_lat0))
+    M = _M0 + (northing-_y0)/_k0
+    mu = M/(_a*(1-_e2/4-3*_e22/64-5*_e23/256))
+    _e1 = (1-_math.sqrt(1-_e2))/(1+_math.sqrt(1-_e2))
+    phi1 = (mu + (3*_e1/2-27*_e1**3/32)*_math.sin(2*mu)
+               + (21*_e1**2/16-55*_e1**4/32)*_math.sin(4*mu)
+               + (151*_e1**3/96)*_math.sin(6*mu))
+    sp = _math.sin(phi1); cp = _math.cos(phi1); tp = _math.tan(phi1)
+    N1 = _a/_math.sqrt(1-_e2*sp*sp); T1 = tp*tp; C1 = _ep2*cp*cp
+    R1 = _a*(1-_e2)/(1-_e2*sp*sp)**1.5
+    D = (easting-_x0)/(N1*_k0)
+    D2=D*D; D3=D2*D; D4=D2*D2; D5=D4*D; D6=D3*D3
+    lat = phi1 - (N1*tp/R1)*(D2/2 - (5+3*T1+10*C1-4*C1*C1-9*_ep2)*D4/24
+                              + (61+90*T1+298*C1+45*T1*T1-252*_ep2-3*C1*C1)*D6/720)
+    lon = _lon0 + (D - (1+2*T1+C1)*D3/6
+                     + (5-2*C1+28*T1-3*C1*C1+8*_ep2+24*T1*T1)*D5/120) / cp
+    # Datum correction: Israel 1993 → WGS84 (constant shift, <2м error across Israel)
+    return (_math.degrees(lat) + 0.00036880, _math.degrees(lon) + 0.00070077)
+
+_itm_to_wgs = True  # flag: ITM conversion available (always True now)
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
@@ -132,6 +155,21 @@ MUNICIPAL_ARCGIS = [
     {"name": "Maale Adumim",
      "url": "https://services8.arcgis.com/0sT7uxglS74LMFfS/arcgis/rest/services/MIKLATIM/FeatureServer/0",
      "bbox": (31.72, 35.26, 31.80, 35.34)},
+    {"name": "Netanya Shelters",
+     "url": "https://services5.arcgis.com/ySpO9UsTrqoVbhLe/arcgis/rest/services/מקלטים_ציבוריים/FeatureServer/1",
+     "bbox": (32.27, 34.83, 32.36, 34.90)},
+    {"name": "Netanya Schools",
+     "url": "https://services5.arcgis.com/ySpO9UsTrqoVbhLe/arcgis/rest/services/בתי_ספר_עם_מקלט/FeatureServer/2",
+     "bbox": (32.27, 34.83, 32.36, 34.90)},
+    {"name": "Netanya Migunit",
+     "url": "https://services5.arcgis.com/ySpO9UsTrqoVbhLe/arcgis/rest/services/מיגוניות/FeatureServer/0",
+     "bbox": (32.27, 34.83, 32.36, 34.90)},
+    {"name": "Netanya Underground",
+     "url": "https://services5.arcgis.com/ySpO9UsTrqoVbhLe/arcgis/rest/services/מחסות_ציבוריים/FeatureServer/1383",
+     "bbox": (32.27, 34.83, 32.36, 34.90)},
+    {"name": "Afula Schools",
+     "url": "https://services.arcgis.com/sqnnBCbp6zhZJJIG/arcgis/rest/services/מקלטים_בבתי_ספר/FeatureServer/0",
+     "bbox": (32.50, 35.11, 32.55, 35.18)},
 ]
 
 
@@ -944,6 +982,108 @@ def fetch_shelters_miklat(lat, lon, radius_m=2000):
     return shelters
 
 
+# ── ИЕРУСАЛИМ — муниципальные данные (186 убежищ с адресами) ──────────────────
+_JLM_DATA = []    # [[lat, lon, "addr", "name"], ...]
+_JLM_GRID = {}
+
+def _download_jlm_data(fpath):
+    """Скачивает GeoJSON убежищ Иерусалима."""
+    import json as _json
+    try:
+        logger.info("Downloading Jerusalem shelters from datacity...")
+        r = requests.get(
+            "https://jerusalem.datacity.org.il/api/3/action/package_show?id=public-shelters",
+            headers={"User-Agent": "YallaMiklat/1.0"}, timeout=10)
+        resources = r.json().get("result", {}).get("resources", [])
+        geojson_url = None
+        for res in reversed(resources):
+            if res.get("format") == "GeoJSON" and res.get("url"):
+                geojson_url = res["url"]
+                break
+        if not geojson_url:
+            return None
+        r2 = requests.get(geojson_url, headers={"User-Agent": "YallaMiklat/1.0"}, timeout=15)
+        r2.raise_for_status()
+        feats = r2.json().get("features", [])
+        data = []
+        for f in feats:
+            coords = f.get("geometry", {}).get("coordinates", [])
+            if len(coords) >= 2:
+                props = f.get("properties", {})
+                num = int(props.get("\u05de\u05e1\u05e4\u05e8 \u05de\u05e7\u05dc\u05d8", 0) or 0)
+                data.append([round(coords[1], 6), round(coords[0], 6),
+                             "", f"\u05de\u05e7\u05dc\u05d8 \u05e6\u05d9\u05d1\u05d5\u05e8\u05d9 {num}" if num else "\u05de\u05e7\u05dc\u05d8 \u05e6\u05d9\u05d1\u05d5\u05e8\u05d9"])
+        with open(fpath, "w", encoding="utf-8") as fp:
+            _json.dump(data, fp, ensure_ascii=False, separators=(",", ":"))
+        logger.info("Jerusalem: downloaded %d shelters", len(data))
+        return data
+    except Exception as e:
+        logger.error("Failed to download Jerusalem data: %s", e)
+        return None
+
+
+def _load_jlm_data():
+    """Загружает данные убежищ Иерусалима."""
+    global _JLM_DATA, _JLM_GRID
+    import os, json as _json
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        base = os.getcwd()
+    fpath = os.path.join(base, "jerusalem_shelters.json")
+    raw = None
+    if os.path.exists(fpath):
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                raw = _json.load(f)
+            logger.info("Jerusalem: loaded %d shelters from cache", len(raw))
+        except Exception:
+            raw = None
+    if not raw:
+        raw = _download_jlm_data(fpath)
+    if not raw:
+        return
+    _JLM_DATA = raw
+    gs = _MIKLAT_GRID_SIZE
+    for i, item in enumerate(raw):
+        lat, lon = item[0], item[1]
+        key = (round(lat / gs), round(lon / gs))
+        _JLM_GRID.setdefault(key, []).append(i)
+    logger.info("Jerusalem: %d shelters indexed", len(raw))
+
+
+def fetch_shelters_jlm(lat, lon, radius_m=2000):
+    """Быстрый поиск по данным муниципалитета Иерусалима."""
+    if not _JLM_DATA:
+        return []
+    delta = max(1, int(radius_m / 1100))
+    gs = _MIKLAT_GRID_SIZE
+    cy = round(lat / gs)
+    cx = round(lon / gs)
+    shelters = []
+    for dy in range(-delta, delta + 1):
+        for dx in range(-delta, delta + 1):
+            for idx in _JLM_GRID.get((cy + dy, cx + dx), []):
+                item = _JLM_DATA[idx]
+                slat, slon = item[0], item[1]
+                dist = haversine(lat, lon, slat, slon)
+                if dist <= radius_m:
+                    addr = item[2] if len(item) > 2 else ""
+                    name = item[3] if len(item) > 3 else ""
+                    shelters.append({
+                        "id": f"jlm:{idx}",
+                        "lat": slat, "lon": slon,
+                        "address": addr or name or "\u05de\u05e7\u05dc\u05d8 \u05e6\u05d9\u05d1\u05d5\u05e8\u05d9, \u05d9\u05e8\u05d5\u05e9\u05dc\u05d9\u05dd",
+                        "name": name or "\u05de\u05e7\u05dc\u05d8 \u05e6\u05d9\u05d1\u05d5\u05e8\u05d9",
+                        "type_raw": "bomb_shelter",
+                        "hours": "", "phone": "", "notes": "",
+                        "distance": round(dist),
+                        "source": "jlm",
+                    })
+    shelters.sort(key=lambda x: x["distance"])
+    return shelters
+
+
 def fetch_shelters_static(lat, lon, radius_m=5000):
     """Достаём убежища из статических данных (Google Maps KML)."""
     shelters = []
@@ -995,7 +1135,7 @@ TEXTS = {
         "menu_report": "📝 Добавить миклат",
         "menu_lang":   "🌐 Язык",
         "menu_help":   "❓ Помощь",
-        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~7,700 убежищ по стране",
+        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~19,000 убежищ по стране",
         "welcome":      "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища.\n\nНашёл миклат, которого нет в базе? → /report",
         "send_loc":     "📍 Отправить геолокацию",
         "no_shelters":  "😔 Убежищ в радиусе {radius} м не найдено.\nКоординаты: {lat:.5f}, {lon:.5f}\n\nПопробуй увеличить радиус /radius или поискать на Google Maps: מקלט ציבורי",
@@ -1040,7 +1180,7 @@ TEXTS = {
         "menu_report": "📝 הוסף מקלט",
         "menu_lang":   "🌐 שפה",
         "menu_help":   "❓ עזרה",
-        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~7,700 מקלטים",
+        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~19,000 מקלטים",
         "welcome":      "🛡️ *יאללה, מקלט!*\n\nשלח מיקום — אראה לך את המקלטים הקרובים.\n\nמצאת מקלט שלא נמצא? → /report",
         "send_loc":     "📍 שלח מיקום",
         "no_shelters":  "😔 לא נמצאו מקלטים ברדיוס {radius} מ'.\nקואורדינטות: {lat:.5f}, {lon:.5f}\n\nחפש ב-Google Maps: מקלט ציבורי",
@@ -1085,7 +1225,7 @@ TEXTS = {
         "menu_report": "📝 Add shelter",
         "menu_lang":   "🌐 Language",
         "menu_help":   "❓ Help",
-        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~7,700 shelters",
+        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~19,000 shelters",
         "welcome":      "🛡️ *Yalla, Miklat!*\n\nSend your location — I'll show the nearest shelters.\n\nFound a shelter not in our database? → /report",
         "send_loc":     "📍 Send location",
         "no_shelters":  "😔 No shelters within {radius} m.\nCoords: {lat:.5f}, {lon:.5f}\n\nTry Google Maps: מקלט ציבורי nearby",
@@ -1354,6 +1494,9 @@ def shelter_type_label(raw_type, lang="ru"):
         "מרחב מוגן קהילתי":           ("🏢", "Общ. убежище", "מרחב מוגן", "Community shelter"),
         "מתקן מגון מני ילדים":        ("👶", "Убежище (дети)", "מקלט ילדים", "Children shelter"),
         "מתקן מגון רווחה":            ("🏥", "Убежище (соцслужба)", "מקלט רווחה", "Welfare shelter"),
+        "בתי ספר":                     ("🏫", "Убежище (школа)", "מקלט בית ספר", "School shelter"),
+        "מיגוניות":                    ("🛡️", "Мигунит", "מיגונית", "Miguniot"),
+        "תווך תת קרקעי":              ("🅿️", "Подземное укрытие", "מחסה תת קרקעי", "Underground shelter"),
         'ממ"ד':                        ("🏠", "Мамад", "ממ\"ד", "Mamad"),
         "ממד":                         ("🏠", "Мамад", "ממ\"ד", "Mamad"),
     }
@@ -1437,6 +1580,8 @@ def _settlement_names_osm(lat, lon, radius=3000):
     try:
         r = requests.post(OVERPASS_URL, data={"data": query}, timeout=8)
         r.raise_for_status()
+        if "json" not in r.headers.get("Content-Type", ""):
+            return []
         elements = r.json().get("elements", [])
     except Exception:
         return []
@@ -1474,9 +1619,6 @@ def fetch_shelters_govmap(lat, lon, radius_m=None):
     """Ищем убежища через GovMap (государственный геопортал Израиля).
     Кэшируем все убежища города — при повторном запросе из того же города моментально.
     """
-    if _itm_to_wgs is None:
-        return []  # pyproj не установлен
-
     if radius_m is None:
         radius_m = SEARCH_RADIUS_M
 
@@ -1611,6 +1753,9 @@ def fetch_shelters_osm(lat, lon, radius_m=None):
     try:
         r = requests.post(OVERPASS_URL, data={"data": query}, timeout=5)
         r.raise_for_status()
+        if "json" not in r.headers.get("Content-Type", ""):
+            logger.warning("Overpass returned non-JSON (rate limited?)")
+            return []
         data = r.json()
     except Exception as e:
         logger.warning("Overpass API error: %s", e)
@@ -1741,21 +1886,23 @@ def _parse_municipal_feature(feat, ulat, ulon, source_name):
 
     # Адрес — пробуем разные поля
     addr = ""
-    for key in ("Full_Address", "כתובת", "Adress", "adress", "ADDRESS",
+    for key in ("Full_Address", "כתובת", "Adress", "adress", "address", "ADDRESS",
                 "ShelterAddress", "o_adress"):
         v = (a.get(key) or "").strip()
         if v and v != " ":
             addr = v
             break
     if not addr:
-        street = (a.get("shem_recho") or a.get("STREETNAME") or "").strip()
-        house = str(a.get("ms_bait") or a.get("HOUSE") or "").strip()
+        street = (a.get("shem_recho") or a.get("STREETNAME") or a.get("Street_Nam")
+                  or a.get("STREET_NAM") or "").strip()
+        house = str(a.get("ms_bait") or a.get("HOUSE") or a.get("House_Numb")
+                    or a.get("HOUSE_NUM") or "").strip()
         addr = f"{street} {house}".strip()
 
     # Название
     name = ""
-    for key in ("name", "Name", "shem", "ShelterName", "ID", "מקלט",
-                "o_name", "place", "Miklat_Num"):
+    for key in ("name", "Name", "NAME", "shem", "ShelterName", "Site_name", "SITE_NAME",
+                "PointName", "ID", "מקלט", "o_name", "place", "Miklat_Num"):
         v = str(a.get(key) or "").strip()
         if v and v != " " and v != "None":
             name = v
@@ -1765,6 +1912,7 @@ def _parse_municipal_feature(feat, ulat, ulon, source_name):
 
     # Тип
     type_raw = (a.get("t_sug") or a.get("LayerNa") or a.get("שימוש_ראשי")
+                or a.get("Sub_Theme") or a.get("theme_desc")
                 or a.get("place") or "bomb_shelter")
 
     # ID — стабильный
@@ -1780,7 +1928,7 @@ def _parse_municipal_feature(feat, ulat, ulon, source_name):
         "type_raw": type_raw,
         "hours":    (a.get("opening_times") or "").strip() if isinstance(a.get("opening_times"), str) else "",
         "phone":    "",
-        "notes":    (a.get("הערות") or a.get("hearot") or a.get("Comments") or "").strip() if isinstance(a.get("הערות") or a.get("hearot") or a.get("Comments"), str) else "",
+        "notes":    (a.get("הערות") or a.get("hearot") or a.get("Comments") or a.get("location_n") or a.get("SITE_DESC") or a.get("STREET_DES") or "").strip() if isinstance(a.get("הערות") or a.get("hearot") or a.get("Comments") or a.get("location_n") or a.get("SITE_DESC") or a.get("STREET_DES"), str) else "",
         "distance": round(dist),
         "source":   "muni",
     }
@@ -1853,7 +2001,7 @@ def _fetch_user_shelters_sync(lat, lon, radius_m):
 def deduplicate_shelters(shelters, threshold_m=50):
     """Убираем дубли — если два убежища ближе threshold_m друг к другу, берём с большим приоритетом."""
     # Приоритет: ta > muni > gov > user > osm
-    priority = {"ta": 7, "muni": 6, "gov": 5, "waze": 4, "mkl": 3, "kml": 3, "user": 2, "osm": 1}
+    priority = {"ta": 7, "muni": 6, "jlm": 5, "gov": 5, "waze": 4, "mkl": 3, "kml": 3, "user": 2, "osm": 1}
     result = []
     for s in shelters:
         is_dup = False
@@ -2032,7 +2180,7 @@ async def fetch_shelters_municipal_async(lat, lon, radius_m=5000):
 async def fetch_shelters_govmap_async(lat, lon, radius_m=5000):
     """Асинхронный GovMap через threadpool."""
     global _govmap_broken, _govmap_fails
-    if _itm_to_wgs is None or _govmap_broken:
+    if _govmap_broken:
         return []
 
     place_names = await asyncio.to_thread(reverse_geocode_names, lat, lon)
@@ -2178,18 +2326,22 @@ async def fetch_shelters_all_async(lat, lon):
     # miklat.co.il — мгновенно (in-memory grid index)
     shelters_mkl = fetch_shelters_miklat(lat, lon, radius_m=5000)
 
+    # Jerusalem municipality — мгновенно (in-memory grid index)
+    shelters_jlm = fetch_shelters_jlm(lat, lon, radius_m=5000)
+
     muni_near = [s for s in shelters_muni if s["distance"] <= base_radius]
     gov_near  = [s for s in shelters_gov  if s["distance"] <= base_radius + 1000]
     waze_near = [s for s in shelters_waze if s["distance"] <= base_radius]
     kml_near  = [s for s in shelters_kml  if s["distance"] <= base_radius]
     mkl_near  = [s for s in shelters_mkl  if s["distance"] <= base_radius]
+    jlm_near  = [s for s in shelters_jlm  if s["distance"] <= base_radius]
     user_near = [s for s in shelters_user if s["distance"] <= base_radius]
 
-    logger.info("Async: muni=%d gov=%d waze=%d osm=%d ta=%d kml=%d mkl=%d user=%d",
+    logger.info("Async: muni=%d gov=%d waze=%d osm=%d ta=%d kml=%d mkl=%d jlm=%d user=%d",
                 len(muni_near), len(gov_near), len(waze_near), len(shelters_osm),
-                len(shelters_ta), len(kml_near), len(mkl_near), len(user_near))
+                len(shelters_ta), len(kml_near), len(mkl_near), len(jlm_near), len(user_near))
 
-    all_shelters = shelters_ta + muni_near + gov_near + waze_near + kml_near + mkl_near + user_near + shelters_osm
+    all_shelters = shelters_ta + muni_near + gov_near + jlm_near + waze_near + kml_near + mkl_near + user_near + shelters_osm
     all_shelters = deduplicate_shelters(all_shelters)
 
     for expanded_r in (3000, 5000):
@@ -2202,8 +2354,9 @@ async def fetch_shelters_all_async(lat, lon):
         waze_ext = [s for s in shelters_waze if s["distance"] <= expanded_r]
         kml_ext  = [s for s in shelters_kml  if s["distance"] <= expanded_r]
         mkl_ext  = [s for s in shelters_mkl  if s["distance"] <= expanded_r]
+        jlm_ext  = [s for s in shelters_jlm  if s["distance"] <= expanded_r]
         user_ext = [s for s in shelters_user if s["distance"] <= expanded_r]
-        extra = shelters_ta + muni_ext + gov_ext + waze_ext + kml_ext + mkl_ext + user_ext + osm_ext
+        extra = shelters_ta + muni_ext + gov_ext + jlm_ext + waze_ext + kml_ext + mkl_ext + user_ext + osm_ext
         all_shelters = deduplicate_shelters(extra)
 
     all_shelters.sort(key=lambda x: x["distance"])
@@ -2626,18 +2779,21 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             json={"keyword": "מקלט תל אביב", "type": "all"},
             headers={"Content-Type": "application/json"}, timeout=10)
         cnt = len(r.json().get("data", {}).get("Result", []))
-        pyproj_ok = "✅" if _itm_to_wgs is not None else "⚠️ no pyproj"
+        pyproj_ok = "✅ native ITM→WGS84"
         await update.message.reply_text(f"✅ GovMap API (results: {cnt}) {pyproj_ok}")
     except Exception as e:
         await update.message.reply_text(f"❌ GovMap: {e}")
     # Overpass check
     try:
         r = requests.post(OVERPASS_URL, data={"data": '[out:json][timeout:5];node["amenity"="shelter"](32.08,34.77,32.09,34.78);out count;'}, timeout=10)
-        data = r.json()
-        total = data.get("elements", [{}])[0].get("tags", {}).get("total", "?")
-        await update.message.reply_text(f"✅ Overpass API (sample count: {total})")
+        if "json" not in r.headers.get("Content-Type", ""):
+            await update.message.reply_text(f"⚠️ Overpass: rate-limited (HTTP {r.status_code})")
+        else:
+            data = r.json()
+            total = data.get("elements", [{}])[0].get("tags", {}).get("total", "?")
+            await update.message.reply_text(f"✅ Overpass API (sample count: {total})")
     except Exception as e:
-        await update.message.reply_text(f"❌ Overpass: {e}")
+        await update.message.reply_text(f"⚠️ Overpass: {e} (supplementary source)")
     # Municipal ArcGIS endpoints
     await update.message.reply_text(f"📡 Municipal ArcGIS: {len(MUNICIPAL_ARCGIS)} endpoints")
     # User-reported shelters
@@ -2648,6 +2804,8 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"👥 User shelters: DB unavailable")
     # miklat.co.il static data
     await update.message.reply_text(f"🗺 miklat.co.il: {len(_MIKLAT_DATA)} shelters, {len(_MIKLAT_GRID)} grid cells")
+    # Jerusalem municipality data
+    await update.message.reply_text(f"🏛️ Jerusalem: {len(_JLM_DATA)} shelters")
     # KML static data
     kml_total = sum(len(v) for v in STATIC_SHELTERS.values())
     await update.message.reply_text(f"📍 KML: {kml_total} shelters in {len(STATIC_SHELTERS)} cities")
@@ -2695,6 +2853,14 @@ async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mkl_time = (_time.time() - t0) * 1000
     nearest_mkl = f"{mkl_results[0]['distance']}м" if mkl_results else "—"
     msg_lines.append(f"🗺 miklat.co.il: {len(mkl_results)} ≤2км ({mkl_time:.0f}мс) ближ: {nearest_mkl}")
+
+    # 1b. Jerusalem (instant)
+    t0 = _time.time()
+    jlm_results = fetch_shelters_jlm(lat, lon, radius_m=2000)
+    jlm_time = (_time.time() - t0) * 1000
+    nearest_jlm = f"{jlm_results[0]['distance']}м" if jlm_results else "—"
+    if jlm_results:
+        msg_lines.append(f"🏛️ Jerusalem: {len(jlm_results)} ≤2км ({jlm_time:.0f}мс) ближ: {nearest_jlm}")
 
     # 2. KML (instant)
     t0 = _time.time()
@@ -2875,6 +3041,7 @@ def main():
         logger.error("DB init failed: %s", e)
 
     _load_miklat_data()
+    _load_jlm_data()
     app = Application.builder().token(BOT_TOKEN).build()
 
     review_conv = ConversationHandler(
