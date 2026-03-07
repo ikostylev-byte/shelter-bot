@@ -2801,6 +2801,8 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Overpass: {e} (supplementary source)")
     # Municipal ArcGIS endpoints
     await update.message.reply_text(f"📡 Municipal ArcGIS: {len(MUNICIPAL_ARCGIS)} endpoints")
+    map_url = os.environ.get("MAP_URL", "") or MAP_URL
+    await update.message.reply_text(f"🗺 MAP_URL: {map_url or '❌ not set'}")
     # User-reported shelters
     try:
         ucnt = await count_user_shelters()
@@ -2966,15 +2968,16 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if text in map_btns:
-        if MAP_URL:
+        map_url = os.environ.get("MAP_URL", "") or MAP_URL
+        if map_url:
             kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🗺 " + t(ctx, "menu_map"), url=MAP_URL)
+                InlineKeyboardButton("🗺 " + t(ctx, "menu_map"), url=map_url)
             ]])
             msg = {"ru": "Карта всех убежищ:", "he": "מפת כל המקלטים:", "en": "All shelters map:"}
             lang = (ctx.user_data or {}).get("lang", "ru")
             await update.message.reply_text(msg.get(lang, msg["ru"]), reply_markup=kb)
         else:
-            await update.message.reply_text("🗺 Map coming soon!", reply_markup=get_location_kb(ctx))
+            await update.message.reply_text("🗺 Map coming soon!\nSet MAP_URL env var.", reply_markup=get_location_kb(ctx))
         return
 
     await update.message.reply_text(t(ctx, "send_loc_btn"), reply_markup=get_location_kb(ctx))
