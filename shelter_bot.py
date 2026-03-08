@@ -1156,6 +1156,7 @@ TEXTS = {
         "review_cancel": "Отменено.",
         "btn_going":    "🤝 Иду сюда",
         "btn_review":   "✍️ Отзыв",
+        "btn_report":   "❌ Нет миклата",
         "btn_leave":    "🚪 Покинуть",
         "btn_back":     "← Назад",
         "going_header":  "🤝 *Идут сюда ({count}):*",
@@ -1202,6 +1203,7 @@ TEXTS = {
         "review_cancel": "בוטל.",
         "btn_going":    "🤝 אני בדרך",
         "btn_review":   "✍️ ביקורת",
+        "btn_report":   "❌ אין מקלט",
         "btn_leave":    "🚪 יציאה",
         "btn_back":     "← חזרה",
         "going_header":  "🤝 *בדרך לכאן ({count}):*",
@@ -1248,6 +1250,7 @@ TEXTS = {
         "review_cancel": "Cancelled.",
         "btn_going":    "🤝 Going here",
         "btn_review":   "✍️ Review",
+        "btn_report":   "❌ No shelter",
         "btn_leave":    "🚪 Leave",
         "btn_back":     "← Back",
         "going_header":  "🤝 *Heading here ({count}):*",
@@ -1347,6 +1350,18 @@ async def db_init():
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 verified BOOLEAN DEFAULT FALSE
             )""")
+        # Репорты о несуществующих убежищах
+        await c.execute("""
+            CREATE TABLE IF NOT EXISTS shelter_reports (
+                id SERIAL PRIMARY KEY,
+                shelter_id TEXT NOT NULL,
+                lat DOUBLE PRECISION,
+                lon DOUBLE PRECISION,
+                user_id BIGINT NOT NULL,
+                reason TEXT DEFAULT 'not_found',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(shelter_id, user_id)
+            )""")
     logger.info("DB ready")
 
 
@@ -1356,6 +1371,46 @@ async def save_user_shelter(lat, lon, description, photo_id, user_id, username):
         await c.execute(
             "INSERT INTO user_shelters (lat,lon,description,photo_id,user_id,username) VALUES($1,$2,$3,$4,$5,$6)",
             lat, lon, description, photo_id, user_id, username)
+
+
+REPORT_THRESHOLD = 2  # после N репортов убежище скрывается
+
+_reported_shelters = set()  # кэш shelter_id с >= REPORT_THRESHOLD репортов
+
+async def load_reported_shelters():
+    """Загружаем из БД список shelter_id с достаточным количеством репортов."""
+    global _reported_shelters
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT shelter_id, COUNT(*) as cnt FROM shelter_reports "
+                "GROUP BY shelter_id HAVING COUNT(*) >= $1", REPORT_THRESHOLD)
+            _reported_shelters = {r["shelter_id"] for r in rows}
+            if _reported_shelters:
+                logger.info("Loaded %d reported (hidden) shelters", len(_reported_shelters))
+    except Exception as e:
+        logger.warning("Failed to load reported shelters: %s", e)
+
+
+async def report_shelter(shelter_id, lat, lon, user_id, reason="not_found"):
+    """Юзер репортит что убежища нет."""
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        await c.execute(
+            "INSERT INTO shelter_reports (shelter_id, lat, lon, user_id, reason) "
+            "VALUES($1,$2,$3,$4,$5) ON CONFLICT (shelter_id, user_id) DO NOTHING",
+            shelter_id, lat, lon, user_id, reason)
+        cnt = await c.fetchval(
+            "SELECT COUNT(*) FROM shelter_reports WHERE shelter_id=$1", shelter_id)
+        if cnt >= REPORT_THRESHOLD:
+            _reported_shelters.add(shelter_id)
+        return cnt
+
+
+def is_shelter_reported(shelter_id):
+    """Проверяем, скрыто ли убежище по репортам."""
+    return shelter_id in _reported_shelters
 
 
 async def fetch_user_shelters(lat, lon, radius_m=2000):
@@ -2090,6 +2145,7 @@ def fetch_shelters(lat, lon):
         all_shelters = deduplicate_shelters(extra)
 
     all_shelters.sort(key=lambda x: x["distance"])
+    all_shelters = [s for s in all_shelters if not is_shelter_reported(s["id"])]
 
     return all_shelters[:MAX_RESULTS]
 
@@ -2365,6 +2421,7 @@ async def fetch_shelters_all_async(lat, lon):
         all_shelters = deduplicate_shelters(extra)
 
     all_shelters.sort(key=lambda x: x["distance"])
+    all_shelters = [s for s in all_shelters if not is_shelter_reported(s["id"])]
     return all_shelters[:MAX_RESULTS]
 
 
@@ -2532,7 +2589,7 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         map_buf = await asyncio.to_thread(generate_map, lat, lon, shelters)
         caption_lines = [t(ctx, "map_legend") + "\n"]
         for i, s in enumerate(shelters, 1):
-            src = {"ta": "🟢", "muni": "🏛️", "gov": "🏛️", "waze": "🚗", "kml": "📍", "mkl": "📍", "osm": "🌐", "user": "👥"}.get(s["source"], "")
+            src = {"ta": "✅", "muni": "✅", "gov": "✅", "jlm": "✅", "waze": "🚗", "kml": "📍", "mkl": "⚠️", "osm": "🌐", "user": "👥"}.get(s["source"], "")
             caption_lines.append(f"#{i} {s['address']} — {s['distance']} {dist_unit} {src}")
         await update.message.reply_photo(
             photo=map_buf,
@@ -2576,6 +2633,15 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     reviews = await get_reviews(s["id"], limit=3)
 
     lines = [f"*{s['type']}*", f"📍 {s['address']}", f"📏 {s['distance']} {dist_unit}"]
+    # Индикатор достоверности
+    verified_sources = {"ta", "muni", "jlm", "gov"}
+    src = s.get("source", "")
+    if src in verified_sources:
+        lines.append("✅ " + {"ru": "Верифицировано", "he": "מאומת", "en": "Verified"}.get(lang, "Verified"))
+    elif s.get("address") and s["address"] != "адрес не указан" and len(s["address"]) > 5:
+        lines.append("✅ " + {"ru": "Есть адрес", "he": "יש כתובת", "en": "Has address"}.get(lang, "Has address"))
+    else:
+        lines.append("⚠️ " + {"ru": "Только координаты — проверьте на месте", "he": "קואורדינטות בלבד — בדקו במקום", "en": "Coordinates only — verify on site"}.get(lang, "Coordinates only"))
     if s["hours"]: lines.append(f"🕐 {s['hours']}")
     if s["phone"]: lines.append(f"📞 {s['phone']}")
     if s["notes"]:
@@ -2605,7 +2671,10 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(t(ctx, "btn_going"), callback_data=f"checkin:{s['id']}:{idx}"),
             InlineKeyboardButton(t(ctx, "btn_review"), callback_data=f"review:{s['id']}:{s['address'][:30]}"),
         ],
-        [InlineKeyboardButton(t(ctx, "btn_back"), callback_data="back")],
+        [
+            InlineKeyboardButton(t(ctx, "btn_report"), callback_data=f"report:{idx}"),
+            InlineKeyboardButton(t(ctx, "btn_back"), callback_data="back"),
+        ],
     ])
 
     await query.message.reply_text(
@@ -2629,6 +2698,40 @@ async def cb_select_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
         if media:
             await query.message.reply_media_group(media=media)
+
+
+async def cb_report_shelter(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Юзер репортит что убежища нет на месте."""
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split(":")[1])
+    shelters = ctx.user_data.get("shelters", [])
+    if not shelters or idx >= len(shelters):
+        return
+    
+    s = shelters[idx]
+    user_id = query.from_user.id
+    lang = ctx.user_data.get("lang", "ru")
+    
+    try:
+        cnt = await report_shelter(s["id"], s["lat"], s["lon"], user_id)
+        if cnt >= REPORT_THRESHOLD:
+            msg = {
+                "ru": f"❌ Убежище «{s['address']}» скрыто ({cnt} репортов). Спасибо за помощь!",
+                "he": f"❌ המקלט «{s['address']}» הוסתר ({cnt} דיווחים). תודה!",
+                "en": f"❌ Shelter «{s['address']}» hidden ({cnt} reports). Thank you!",
+            }
+        else:
+            need = REPORT_THRESHOLD - cnt
+            msg = {
+                "ru": f"⚠️ Репорт принят ({cnt}/{REPORT_THRESHOLD}). Ещё {need} и убежище будет скрыто.",
+                "he": f"⚠️ הדיווח התקבל ({cnt}/{REPORT_THRESHOLD}). עוד {need} דיווחים להסתרה.",
+                "en": f"⚠️ Report received ({cnt}/{REPORT_THRESHOLD}). {need} more to hide.",
+            }
+        await query.message.reply_text(msg.get(lang, msg["en"]))
+    except Exception as e:
+        logger.error("Report error: %s", e)
+        await query.message.reply_text("⚠️ Error saving report")
 
 
 async def cb_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2809,6 +2912,8 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"👥 User-reported shelters: {ucnt}")
     except Exception as e:
         await update.message.reply_text(f"👥 User shelters: DB unavailable")
+    # Reported (hidden) shelters
+    await update.message.reply_text(f"🚫 Hidden (reported): {len(_reported_shelters)} shelters")
     # miklat.co.il static data
     await update.message.reply_text(f"🗺 miklat.co.il: {len(_MIKLAT_DATA)} shelters, {len(_MIKLAT_GRID)} grid cells")
     # Jerusalem municipality data
@@ -3058,6 +3163,7 @@ def main():
     import asyncio
     try:
         asyncio.get_event_loop().run_until_complete(db_init())
+        asyncio.get_event_loop().run_until_complete(load_reported_shelters())
     except Exception as e:
         logger.error("DB init failed: %s", e)
 
@@ -3102,6 +3208,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_lang,           pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(cb_select_shelter, pattern=r"^select:"))
     app.add_handler(CallbackQueryHandler(cb_back,           pattern=r"^back$"))
+    app.add_handler(CallbackQueryHandler(cb_report_shelter,  pattern=r"^report:"))
     app.add_handler(CallbackQueryHandler(cb_checkin,        pattern=r"^checkin:"))
     app.add_handler(CallbackQueryHandler(cb_checkout,       pattern=r"^checkout$"))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
@@ -3109,6 +3216,7 @@ def main():
     app.add_error_handler(global_error_handler)
 
     print("🚀 ялла, миклат! (nationwide) запущен.")
+    print(f"🗺 MAP_URL = {os.environ.get('MAP_URL', '(empty)')!r}")
     app.run_polling(drop_pending_updates=True)
 
 
