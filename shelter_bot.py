@@ -873,78 +873,40 @@ _MIKLAT_GRID = {}       # (grid_lat, grid_lon) → [indices]
 _MIKLAT_GRID_SIZE = 0.01  # ~1.1km grid cells
 
 
-def _download_miklat_data(fpath):
-    """Скачивает данные с miklat.co.il и сохраняет локально."""
-    import json as _json
-    try:
-        logger.info("Downloading shelter data from miklat.co.il ...")
-        r_lite = requests.get("https://miklat.co.il/data/shelters-lite.json",
-                              headers={"User-Agent": "YallaMiklat/1.0"}, timeout=15)
-        r_lite.raise_for_status()
-        lite = r_lite.json()
-
-        # Details (адреса, города) — необязательный
-        details = {}
-        try:
-            r_det = requests.get("https://miklat.co.il/data/shelters-details.json",
-                                 headers={"User-Agent": "YallaMiklat/1.0"}, timeout=15)
-            r_det.raise_for_status()
-            details = r_det.json()
-        except Exception:
-            pass
-
-        # Merge: [lon, lat, addr?, city?]
-        merged = []
-        for i, item in enumerate(lite):
-            entry = [item[0], item[1]]  # lon, lat
-            det = details.get(str(i), {})
-            if det.get("a") or det.get("c"):
-                entry.append(det.get("a", ""))
-                entry.append(det.get("c", ""))
-            merged.append(entry)
-
-        with open(fpath, "w", encoding="utf-8") as f:
-            _json.dump(merged, f, ensure_ascii=False, separators=(",", ":"))
-        logger.info("miklat.co.il: downloaded %d shelters → %s", len(merged), fpath)
-        return merged
-    except Exception as e:
-        logger.error("Failed to download miklat.co.il data: %s", e)
-        return None
-
-
 def _load_miklat_data():
-    """Загружает данные miklat.co.il: из файла или скачивает с сайта."""
+    """Загружает единую базу убежищ из shelters.json (рядом с ботом)."""
     global _MIKLAT_DATA, _MIKLAT_GRID
     import os, json as _json
     try:
         base = os.path.dirname(os.path.abspath(__file__))
     except NameError:
         base = os.getcwd()
-    fpath = os.path.join(base, "miklat_shelters.json")
 
     raw = None
-    if os.path.exists(fpath):
-        try:
-            with open(fpath, "r", encoding="utf-8") as f:
-                raw = _json.load(f)
-            logger.info("miklat.co.il: loaded %d shelters from cache", len(raw))
-        except Exception:
-            raw = None
+    for fname in ("shelters.json", "miklat_shelters.json"):
+        fpath = os.path.join(base, fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    raw = _json.load(f)
+                logger.info("Shelters: loaded %d from %s", len(raw), fname)
+                break
+            except Exception as e:
+                logger.error("Failed to load %s: %s", fname, e)
 
     if not raw:
-        raw = _download_miklat_data(fpath)
-
-    if not raw:
-        logger.warning("miklat.co.il source disabled (no data)")
+        logger.error("❌ shelters.json not found! Place it next to shelter_bot.py")
         return
 
     _MIKLAT_DATA = raw
+    with_addr = sum(1 for m in raw if len(m) > 2 and m[2])
     # Строим пространственный индекс (grid)
     for i, item in enumerate(raw):
         lon, lat = item[0], item[1]
         key = (round(lat / _MIKLAT_GRID_SIZE), round(lon / _MIKLAT_GRID_SIZE))
         _MIKLAT_GRID.setdefault(key, []).append(i)
-    logger.info("miklat.co.il: %d shelters indexed in %d grid cells", len(raw), len(_MIKLAT_GRID))
+    logger.info("Shelters: %d total (%d with address), %d grid cells",
+                len(raw), with_addr, len(_MIKLAT_GRID))
 
 
 def fetch_shelters_miklat(lat, lon, radius_m=2000):
@@ -1137,7 +1099,7 @@ TEXTS = {
         "menu_map":    "🗺 Карта",
         "menu_lang":   "🌐 Язык",
         "menu_help":   "❓ Помощь",
-        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~19,000 убежищ по стране",
+        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~18,500 убежищ по стране",
         "welcome":      "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища.\n\nНашёл миклат, которого нет в базе? → /report",
         "send_loc":     "📍 Отправить геолокацию",
         "no_shelters":  "😔 Убежищ в радиусе {radius} м не найдено.\nКоординаты: {lat:.5f}, {lon:.5f}\n\nПопробуй увеличить радиус /radius или поискать на Google Maps: מקלט ציבורי",
@@ -1184,7 +1146,7 @@ TEXTS = {
         "menu_map":    "🗺 מפה",
         "menu_lang":   "🌐 שפה",
         "menu_help":   "❓ עזרה",
-        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~19,000 מקלטים",
+        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~18,500 מקלטים",
         "welcome":      "🛡️ *יאללה, מקלט!*\n\nשלח מיקום — אראה לך את המקלטים הקרובים.\n\nמצאת מקלט שלא נמצא? → /report",
         "send_loc":     "📍 שלח מיקום",
         "no_shelters":  "😔 לא נמצאו מקלטים ברדיוס {radius} מ'.\nקואורדינטות: {lat:.5f}, {lon:.5f}\n\nחפש ב-Google Maps: מקלט ציבורי",
@@ -1231,7 +1193,7 @@ TEXTS = {
         "menu_map":    "🗺 Map",
         "menu_lang":   "🌐 Language",
         "menu_help":   "❓ Help",
-        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~19,000 shelters",
+        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~18,500 shelters",
         "welcome":      "🛡️ *Yalla, Miklat!*\n\nSend your location — I'll show the nearest shelters.\n\nFound a shelter not in our database? → /report",
         "send_loc":     "📍 Send location",
         "no_shelters":  "😔 No shelters within {radius} m.\nCoords: {lat:.5f}, {lon:.5f}\n\nTry Google Maps: מקלט ציבורי nearby",
@@ -2354,71 +2316,33 @@ async def fetch_shelters_ta_async(lat, lon):
 
 
 async def fetch_shelters_all_async(lat, lon):
-    """Главная функция: ВСЕ источники параллельно через asyncio.gather."""
+    """Поиск убежищ: мгновенный grid lookup из shelters.json + user DB."""
     base_radius = SEARCH_RADIUS_M
 
+    # Основная база — мгновенно (in-memory grid index, <1мс)
+    shelters_db = fetch_shelters_miklat(lat, lon, radius_m=5000)
+    db_near = [s for s in shelters_db if s["distance"] <= base_radius]
+
+    # Краудсорсинг из БД
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(
-                fetch_shelters_municipal_async(lat, lon, radius_m=5000),
-                fetch_shelters_govmap_async(lat, lon, radius_m=5000),
-                fetch_shelters_osm_async(lat, lon, radius_m=base_radius),
-                fetch_shelters_ta_async(lat, lon),
-                fetch_user_shelters(lat, lon, radius_m=5000),
-                asyncio.to_thread(fetch_shelters_waze, lat, lon, 5000),
-                return_exceptions=True,
-            ),
-            timeout=10.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning("fetch_shelters_all_async: overall timeout (12s)")
-        results = [[], [], [], [], [], []]
-
-    shelters_muni = results[0] if not isinstance(results[0], Exception) else []
-    shelters_gov  = results[1] if not isinstance(results[1], Exception) else []
-    shelters_osm  = results[2] if not isinstance(results[2], Exception) else []
-    shelters_ta   = results[3] if not isinstance(results[3], Exception) else []
-    shelters_user = results[4] if not isinstance(results[4], Exception) else []
-    shelters_waze = results[5] if not isinstance(results[5], Exception) else []
-
-    # KML — мгновенно (in-memory)
-    shelters_kml = fetch_shelters_static(lat, lon, radius_m=5000)
-
-    # miklat.co.il — мгновенно (in-memory grid index)
-    shelters_mkl = fetch_shelters_miklat(lat, lon, radius_m=5000)
-
-    # Jerusalem municipality — мгновенно (in-memory grid index)
-    shelters_jlm = fetch_shelters_jlm(lat, lon, radius_m=5000)
-
-    muni_near = [s for s in shelters_muni if s["distance"] <= base_radius]
-    gov_near  = [s for s in shelters_gov  if s["distance"] <= base_radius + 1000]
-    waze_near = [s for s in shelters_waze if s["distance"] <= base_radius]
-    kml_near  = [s for s in shelters_kml  if s["distance"] <= base_radius]
-    mkl_near  = [s for s in shelters_mkl  if s["distance"] <= base_radius]
-    jlm_near  = [s for s in shelters_jlm  if s["distance"] <= base_radius]
+        shelters_user = await fetch_user_shelters(lat, lon, radius_m=5000)
+    except Exception:
+        shelters_user = []
     user_near = [s for s in shelters_user if s["distance"] <= base_radius]
 
-    logger.info("Async: muni=%d gov=%d waze=%d osm=%d ta=%d kml=%d mkl=%d jlm=%d user=%d",
-                len(muni_near), len(gov_near), len(waze_near), len(shelters_osm),
-                len(shelters_ta), len(kml_near), len(mkl_near), len(jlm_near), len(user_near))
+    logger.info("Search: db=%d user=%d (r=%dm)", len(db_near), len(user_near), base_radius)
 
-    all_shelters = shelters_ta + muni_near + gov_near + jlm_near + waze_near + kml_near + mkl_near + user_near + shelters_osm
+    all_shelters = db_near + user_near
     all_shelters = deduplicate_shelters(all_shelters)
 
+    # Расширяем радиус если мало результатов
     for expanded_r in (3000, 5000):
         if len(all_shelters) >= 3:
             break
         logger.info("Expanding to %dm (have %d)", expanded_r, len(all_shelters))
-        osm_ext  = await asyncio.to_thread(fetch_shelters_osm, lat, lon, expanded_r)
-        gov_ext  = [s for s in shelters_gov  if s["distance"] <= expanded_r]
-        muni_ext = [s for s in shelters_muni if s["distance"] <= expanded_r]
-        waze_ext = [s for s in shelters_waze if s["distance"] <= expanded_r]
-        kml_ext  = [s for s in shelters_kml  if s["distance"] <= expanded_r]
-        mkl_ext  = [s for s in shelters_mkl  if s["distance"] <= expanded_r]
-        jlm_ext  = [s for s in shelters_jlm  if s["distance"] <= expanded_r]
+        db_ext = [s for s in shelters_db if s["distance"] <= expanded_r]
         user_ext = [s for s in shelters_user if s["distance"] <= expanded_r]
-        extra = shelters_ta + muni_ext + gov_ext + jlm_ext + waze_ext + kml_ext + mkl_ext + user_ext + osm_ext
-        all_shelters = deduplicate_shelters(extra)
+        all_shelters = deduplicate_shelters(db_ext + user_ext)
 
     all_shelters.sort(key=lambda x: x["distance"])
     all_shelters = [s for s in all_shelters if not is_shelter_reported(s["id"])]
@@ -2872,71 +2796,25 @@ async def cmd_ping(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ DB connected")
     except Exception as e:
         await update.message.reply_text(f"❌ DB: {e}")
-    # ArcGIS check
-    try:
-        r = requests.get(ARCGIS_URL,
-            params={"where":"1=1","outFields":"OBJECTID","f":"json","resultRecordCount":1},
-            timeout=10)
-        cnt = len(r.json().get("features", []))
-        await update.message.reply_text(f"✅ TA GIS API (features: {cnt})")
-    except Exception as e:
-        await update.message.reply_text(f"❌ TA GIS: {e}")
-    # GovMap check
-    try:
-        r = requests.post(GOVMAP_SEARCH_URL,
-            json={"keyword": "מקלט תל אביב", "type": "all"},
-            headers={"Content-Type": "application/json"}, timeout=10)
-        cnt = len(r.json().get("data", {}).get("Result", []))
-        pyproj_ok = "✅ native ITM→WGS84"
-        await update.message.reply_text(f"✅ GovMap API (results: {cnt}) {pyproj_ok}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ GovMap: {e}")
-    # Overpass check
-    try:
-        r = requests.post(OVERPASS_URL, data={"data": '[out:json][timeout:5];node["amenity"="shelter"](32.08,34.77,32.09,34.78);out count;'}, timeout=10)
-        if "json" not in r.headers.get("Content-Type", ""):
-            await update.message.reply_text(f"⚠️ Overpass: rate-limited (HTTP {r.status_code})")
-        else:
-            data = r.json()
-            total = data.get("elements", [{}])[0].get("tags", {}).get("total", "?")
-            await update.message.reply_text(f"✅ Overpass API (sample count: {total})")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Overpass: {e} (supplementary source)")
-    # Municipal ArcGIS endpoints
-    await update.message.reply_text(f"📡 Municipal ArcGIS: {len(MUNICIPAL_ARCGIS)} endpoints")
-    map_url = os.environ.get("MAP_URL", "") or MAP_URL
-    await update.message.reply_text(f"🗺 MAP_URL: {map_url or '❌ not set'}")
+    # Shelters DB
+    with_addr = sum(1 for m in _MIKLAT_DATA if len(m) > 2 and m[2])
+    await update.message.reply_text(
+        f"🗺 Shelters DB: {len(_MIKLAT_DATA)} total ({with_addr} with address)")
     # User-reported shelters
     try:
         ucnt = await count_user_shelters()
-        await update.message.reply_text(f"👥 User-reported shelters: {ucnt}")
-    except Exception as e:
+        await update.message.reply_text(f"👥 User-added shelters: {ucnt}")
+    except Exception:
         await update.message.reply_text(f"👥 User shelters: DB unavailable")
     # Reported (hidden) shelters
-    await update.message.reply_text(f"🚫 Hidden (reported): {len(_reported_shelters)} shelters")
-    # miklat.co.il static data
-    await update.message.reply_text(f"🗺 miklat.co.il: {len(_MIKLAT_DATA)} shelters, {len(_MIKLAT_GRID)} grid cells")
-    # Jerusalem municipality data
-    await update.message.reply_text(f"🏛️ Jerusalem: {len(_JLM_DATA)} shelters")
-    # KML static data
-    kml_total = sum(len(v) for v in STATIC_SHELTERS.values())
-    await update.message.reply_text(f"📍 KML: {kml_total} shelters in {len(STATIC_SHELTERS)} cities")
-    # Waze
-    try:
-        r = requests.get(WAZE_SEARCH_URL, params={
-            "q": "מקלט", "lang": "he", "lon": 34.78, "lat": 32.08,
-            "origin": "livemap", "count": 10,
-        }, headers=WAZE_HEADERS, timeout=5)
-        await update.message.reply_text(f"🚗 Waze: {len(r.json())} results (test query)")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Waze: {e}")
-    # GovMap circuit breaker
-    status = "🔴 disabled" if _govmap_broken else f"🟢 active (fails: {_govmap_fails})"
-    await update.message.reply_text(f"🏛️ GovMap circuit: {status}")
+    await update.message.reply_text(f"🚫 Hidden (reported): {len(_reported_shelters)}")
+    # MAP_URL
+    map_url = os.environ.get("MAP_URL", "") or MAP_URL
+    await update.message.reply_text(f"🗺 MAP_URL: {map_url or '❌ not set'}")
 
 
 async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Диагностика: /diag lat,lon или /diag + отправка локации."""
+    """Диагностика: /diag lat,lon или /diag (центр ТА)."""
     import time as _time
 
     text = update.message.text or ""
@@ -2949,95 +2827,31 @@ async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
     if lat is None:
-        # Стандартная точка — центр ТА
         lat, lon = 32.0853, 34.7818
         await update.message.reply_text(
-            "🔍 *Диагностика* (ТА центр 32.085, 34.782)\n"
+            "🔍 *Диагностика* (ТА центр)\n"
             "Подсказка: `/diag 31.768,35.214` для другой точки",
             parse_mode=ParseMode.MARKDOWN,
         )
 
     msg_lines = [f"📍 *Диагностика {lat:.4f}, {lon:.4f}*\n"]
 
-    # 1. miklat.co.il (instant)
+    # DB lookup
     t0 = _time.time()
-    mkl_results = fetch_shelters_miklat(lat, lon, radius_m=2000)
-    mkl_time = (_time.time() - t0) * 1000
-    nearest_mkl = f"{mkl_results[0]['distance']}м" if mkl_results else "—"
-    msg_lines.append(f"🗺 miklat.co.il: {len(mkl_results)} ≤2км ({mkl_time:.0f}мс) ближ: {nearest_mkl}")
+    results = fetch_shelters_miklat(lat, lon, radius_m=2000)
+    db_time = (_time.time() - t0) * 1000
+    with_addr = sum(1 for s in results if s.get("address") and len(s["address"]) > 5)
+    nearest = f"{results[0]['distance']}м {results[0]['address'][:30]}" if results else "—"
+    msg_lines.append(f"🗺 DB ≤2км: {len(results)} ({db_time:.0f}мс), с адресами: {with_addr}")
+    msg_lines.append(f"🏆 Ближайший: {nearest}")
 
-    # 1b. Jerusalem (instant)
+    # Pipeline
     t0 = _time.time()
-    jlm_results = fetch_shelters_jlm(lat, lon, radius_m=2000)
-    jlm_time = (_time.time() - t0) * 1000
-    nearest_jlm = f"{jlm_results[0]['distance']}м" if jlm_results else "—"
-    if jlm_results:
-        msg_lines.append(f"🏛️ Jerusalem: {len(jlm_results)} ≤2км ({jlm_time:.0f}мс) ближ: {nearest_jlm}")
-
-    # 2. KML (instant)
-    t0 = _time.time()
-    kml_results = fetch_shelters_static(lat, lon, radius_m=2000)
-    kml_time = (_time.time() - t0) * 1000
-    nearest_kml = f"{kml_results[0]['distance']}м" if kml_results else "—"
-    msg_lines.append(f"📍 KML: {len(kml_results)} ≤2км ({kml_time:.0f}мс) ближ: {nearest_kml}")
-
-    # 3. Waze
-    t0 = _time.time()
-    waze_results = await asyncio.to_thread(fetch_shelters_waze, lat, lon, 2000)
-    waze_time = (_time.time() - t0) * 1000
-    nearest_wz = f"{waze_results[0]['distance']}м" if waze_results else "—"
-    msg_lines.append(f"🚗 Waze: {len(waze_results)} ≤2км ({waze_time:.0f}мс) ближ: {nearest_wz}")
-
-    # 4. Municipal ArcGIS
-    t0 = _time.time()
-    muni_results = await fetch_shelters_municipal_async(lat, lon, radius_m=2000)
-    muni_time = (_time.time() - t0) * 1000
-    nearest_muni = f"{muni_results[0]['distance']}м" if muni_results else "—"
-    msg_lines.append(f"🏛️ Municipal: {len(muni_results)} ≤2км ({muni_time:.0f}мс) ближ: {nearest_muni}")
-
-    # 5. GovMap
-    t0 = _time.time()
-    gov_results = await fetch_shelters_govmap_async(lat, lon, radius_m=2000)
-    gov_time = (_time.time() - t0) * 1000
-    nearest_gov = f"{gov_results[0]['distance']}м" if gov_results else "—"
-    gov_flag = " ⚠️ disabled" if _govmap_broken else ""
-    msg_lines.append(f"🏛️ GovMap: {len(gov_results)} ≤2км ({gov_time:.0f}мс) ближ: {nearest_gov}{gov_flag}")
-
-    # 6. TA ArcGIS
-    if is_in_tel_aviv(lat, lon):
-        t0 = _time.time()
-        ta_results = await fetch_shelters_ta_async(lat, lon)
-        ta_time = (_time.time() - t0) * 1000
-        nearest_ta = f"{ta_results[0]['distance']}м" if ta_results else "—"
-        msg_lines.append(f"🟢 TA GIS: {len(ta_results)} ({ta_time:.0f}мс) ближ: {nearest_ta}")
-    else:
-        msg_lines.append(f"🟢 TA GIS: — (не в ТА)")
-
-    # 7. OSM
-    t0 = _time.time()
-    osm_results = await fetch_shelters_osm_async(lat, lon, radius_m=2000)
-    osm_time = (_time.time() - t0) * 1000
-    nearest_osm = f"{osm_results[0]['distance']}м" if osm_results else "—"
-    msg_lines.append(f"🌐 OSM: {len(osm_results)} ≤2км ({osm_time:.0f}мс) ближ: {nearest_osm}")
-
-    # Summary
-    total_raw = len(mkl_results) + len(kml_results) + len(waze_results) + len(muni_results) + len(gov_results) + len(osm_results)
-    msg_lines.append(f"\n📊 *Итого raw*: {total_raw}")
-
-    # Full pipeline
-    t0 = _time.time()
-    async def fake_user(lat, lon, radius_m=2000):
-        return []
-    old_fn = globals().get("fetch_user_shelters")
     pipeline = await fetch_shelters_all_async(lat, lon)
     pipe_time = (_time.time() - t0) * 1000
-    src_counts = {}
-    for s in pipeline:
-        src_counts[s["source"]] = src_counts.get(s["source"], 0) + 1
-    src_str = " ".join(f"{k}={v}" for k, v in sorted(src_counts.items()))
     nearest_pipe = f"{pipeline[0]['distance']}м {pipeline[0]['address'][:25]}" if pipeline else "НЕТ ⚠️"
-    msg_lines.append(f"🔧 *Pipeline*: {len(pipeline)} ({pipe_time:.0f}мс) [{src_str}]")
-    msg_lines.append(f"🏆 *Ближайший*: {nearest_pipe}")
+    msg_lines.append(f"\n🔧 Pipeline: {len(pipeline)} результатов ({pipe_time:.0f}мс)")
+    msg_lines.append(f"🏆 Итог: {nearest_pipe}")
 
     await update.message.reply_text("\n".join(msg_lines), parse_mode=ParseMode.MARKDOWN)
 
@@ -3168,7 +2982,6 @@ def main():
         logger.error("DB init failed: %s", e)
 
     _load_miklat_data()
-    _load_jlm_data()
     app = Application.builder().token(BOT_TOKEN).build()
 
     review_conv = ConversationHandler(
