@@ -14,7 +14,7 @@
 
 import os, math, logging, asyncpg, requests, asyncio
 from io import BytesIO
-from staticmap import StaticMap, CircleMarker
+from staticmap import StaticMap, CircleMarker, Line
 import PIL.Image
 # staticmap использует устаревший ANTIALIAS — патчим
 if not hasattr(PIL.Image, 'ANTIALIAS'):
@@ -2483,7 +2483,6 @@ def compute_safe_route(lat_a, lon_a, lat_b, lon_b, safe_radius=None):
 
 def generate_route_map(path, user_lat=None, user_lon=None) -> 'BytesIO':
     """Рисует карту маршрута: зелёная линия через убежища + маркеры."""
-    from staticmap import Line
     m = StaticMap(900, 700,
                   url_template="https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png")
 
@@ -3046,13 +3045,25 @@ async def cb_route_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(msg.get(lang, msg["en"]), reply_markup=get_location_kb(ctx))
         return
     ctx.user_data["route_start"] = last_loc
-    msg = {"ru": "✅ Точка А сохранена!\n\n🏁 Теперь отправь геолокацию назначения (точка Б).\n\n"
-                 "💡 Совет: зажми палец на карте в Telegram, чтобы отправить произвольную точку.",
-           "he": "✅ נקודה A נשמרה!\n\n🏁 שלח מיקום יעד (נקודה B).\n\n"
-                 "💡 טיפ: לחיצה ארוכה על המפה בטלגרם לשליחת נקודה.",
-           "en": "✅ Point A saved!\n\n🏁 Now send destination location (point B).\n\n"
-                 "💡 Tip: long-press on the map in Telegram to send any point."}
-    await query.message.reply_text(msg.get(lang, msg["en"]))
+    msg = {"ru": "✅ Точка А сохранена!\n\n"
+                 "🏁 *Куда идёшь?* Два варианта:\n\n"
+                 "1️⃣ Напиши адрес, например:\n"
+                 "   `Дизенгоф 50, Тель-Авив`\n\n"
+                 "2️⃣ Отправь точку на карте:\n"
+                 "   📎 → Location → передвинь карту → Send",
+           "he": "✅ נקודה A נשמרה!\n\n"
+                 "🏁 *לאן הולכים?* שתי אפשרויות:\n\n"
+                 "1️⃣ כתוב כתובת, למשל:\n"
+                 "   `דיזנגוף 50, תל אביב`\n\n"
+                 "2️⃣ שלח נקודה במפה:\n"
+                 "   📎 → Location → הזז את המפה → Send",
+           "en": "✅ Point A saved!\n\n"
+                 "🏁 *Where are you going?* Two options:\n\n"
+                 "1️⃣ Type an address, e.g.:\n"
+                 "   `Dizengoff 50, Tel Aviv`\n\n"
+                 "2️⃣ Send a map point:\n"
+                 "   📎 → Location → move the map → Send"}
+    await query.message.reply_text(msg.get(lang, msg["en"]), parse_mode=ParseMode.MARKDOWN)
     ctx.user_data["awaiting_route_dest"] = True
 
 
@@ -3178,6 +3189,144 @@ async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"❌ {ctx.error}")
 
 
+async def _handle_route_address(update: Update, ctx: ContextTypes.DEFAULT_TYPE, address_text: str):
+    """Геокодируем адрес → координаты → строим маршрут."""
+    lang = ctx.user_data.get("lang", "ru")
+
+    searching = {"ru": "🔍 Ищу адрес...", "he": "🔍 מחפש כתובת...", "en": "🔍 Looking up address..."}
+    wait_msg = await update.message.reply_text(searching.get(lang, searching["en"]))
+
+    # Геокодинг через Nominatim
+    lat_b = lon_b = None
+    resolved_addr = address_text
+    try:
+        r = await asyncio.to_thread(
+            lambda: requests.get("https://nominatim.openstreetmap.org/search",
+                params={"q": address_text, "countrycodes": "il",
+                        "format": "json", "limit": 1, "accept-language": "he"},
+                headers={"User-Agent": "YallaMiklat/1.0"}, timeout=5))
+        results = r.json()
+        if results:
+            lat_b = float(results[0]["lat"])
+            lon_b = float(results[0]["lon"])
+            resolved_addr = results[0].get("display_name", address_text).split(",")[0]
+    except Exception as e:
+        logger.warning("Geocoding error: %s", e)
+
+    if lat_b is None:
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+        msg = {"ru": f"❌ Не нашёл адрес «{address_text}».\n\nПопробуй на иврите или отправь точку через 📎 → Location.",
+               "he": f"❌ הכתובת «{address_text}» לא נמצאה.\n\nנסה שוב או שלח נקודה דרך 📎 → Location.",
+               "en": f"❌ Address «{address_text}» not found.\n\nTry in Hebrew or send a map point via 📎 → Location."}
+        await update.message.reply_text(msg.get(lang, msg["en"]))
+        return  # awaiting_route_dest остаётся True — юзер может попробовать снова
+
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+
+    ctx.user_data["awaiting_route_dest"] = False
+
+    # Показываем найденный адрес
+    found_msg = {"ru": f"📍 Нашёл: *{resolved_addr}*",
+                 "he": f"📍 נמצא: *{resolved_addr}*",
+                 "en": f"📍 Found: *{resolved_addr}*"}
+    await update.message.reply_text(found_msg.get(lang, found_msg["en"]), parse_mode=ParseMode.MARKDOWN)
+
+    # Строим маршрут
+    start = ctx.user_data.get("route_start")
+    if not start:
+        return
+    lat_a, lon_a = start
+
+    building = {"ru": "🧭 Строю безопасный маршрут...", "he": "🧭 בונה מסלול בטוח...", "en": "🧭 Building safe route..."}
+    wait_msg2 = await update.message.reply_text(building.get(lang, building["en"]))
+
+    try:
+        path, stats = await asyncio.to_thread(compute_safe_route, lat_a, lon_a, lat_b, lon_b)
+    except Exception as e:
+        logger.error("Route error: %s", e, exc_info=True)
+        await wait_msg2.edit_text(f"❌ Error: {e}")
+        return
+
+    if path is None:
+        msg = {"ru": "❌ Не удалось построить безопасный маршрут.\nНедостаточно убежищ в коридоре.",
+               "he": "❌ לא ניתן לבנות מסלול בטוח.\nאין מספיק מקלטים.",
+               "en": "❌ Could not build safe route.\nNot enough shelters in the corridor."}
+        await wait_msg2.edit_text(msg.get(lang, msg["en"]))
+        return
+
+    # Генерируем карту
+    try:
+        map_buf = await asyncio.to_thread(generate_route_map, path)
+    except Exception as e:
+        logger.error("Route map error: %s", e)
+        map_buf = None
+
+    try:
+        await wait_msg2.delete()
+    except Exception:
+        pass
+
+    # Формируем сообщение (тот же формат что в handle_route_destination)
+    n_shelters = stats["shelters_on_path"]
+    lines = []
+    header = {"ru": "🧭 *Безопасный маршрут*", "he": "🧭 *מסלול בטוח*", "en": "🧭 *Safe route*"}
+    lines.append(header.get(lang, header["en"]))
+    lines.append(f"🏁 → *{resolved_addr}*")
+    lines.append("")
+
+    stat_labels = {
+        "ru": (f"📏 Прямая: {stats['direct_dist']}м → Маршрут: {stats['route_dist']}м (+{stats['detour_pct']}%)",
+               f"🛡️ Убежищ по пути: {n_shelters}",
+               f"⚡ Зона укрытия: {stats['safe_radius']}м",
+               f"📐 Макс. промежуток: {stats['max_gap']}м"),
+        "he": (f"📏 ישיר: {stats['direct_dist']}מ → מסלול: {stats['route_dist']}מ (+{stats['detour_pct']}%)",
+               f"🛡️ מקלטים: {n_shelters}",
+               f"⚡ רדיוס בטוח: {stats['safe_radius']}מ",
+               f"📐 פער מקסימלי: {stats['max_gap']}מ"),
+        "en": (f"📏 Direct: {stats['direct_dist']}m → Route: {stats['route_dist']}m (+{stats['detour_pct']}%)",
+               f"🛡️ Shelters: {n_shelters}",
+               f"⚡ Safe radius: {stats['safe_radius']}m",
+               f"📐 Max gap: {stats['max_gap']}m"),
+    }
+    for line in stat_labels.get(lang, stat_labels["en"]):
+        lines.append(line)
+
+    lines.append("")
+    for i, p in enumerate(path):
+        addr = p["addr"][:35] if p.get("addr") else "—"
+        if i == 0:
+            lines.append(f"🔵 A: {addr}")
+        elif i == len(path) - 1:
+            lines.append(f"🟠 B: {resolved_addr[:35]}")
+        else:
+            d = round(haversine(path[i-1]["lat"], path[i-1]["lon"], p["lat"], p["lon"]))
+            lines.append(f"  {i}. 🛡️ {addr} ({d}м)")
+
+    waypoints = "|".join(f"{p['lat']},{p['lon']}" for p in path[1:-1][:8])
+    gmaps_url = (f"https://www.google.com/maps/dir/?api=1"
+                 f"&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
+                 f"&waypoints={waypoints}&travelmode=walking")
+    nav_label = {"ru": "🗺️ Открыть в Google Maps", "he": "🗺️ פתח ב-Google Maps", "en": "🗺️ Open in Google Maps"}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(nav_label.get(lang, nav_label["en"]), url=gmaps_url)
+    ]])
+
+    if map_buf:
+        await update.message.reply_photo(photo=map_buf, caption="\n".join(lines),
+                                          parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    else:
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+
+    logger.info("Route (addr): %s → %s, %dm, %d shelters",
+                address_text, resolved_addr, stats["route_dist"], n_shelters)
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if "lang" not in ctx.user_data:
         try:
@@ -3186,6 +3335,17 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data["lang"] = "ru"
 
     text = (update.message.text or "").strip()
+
+    # Перехват: если ждём адрес для точки Б маршрута
+    if ctx.user_data.get("awaiting_route_dest") and text and len(text) > 2:
+        # Не перехватываем кнопки меню
+        all_menu_btns = set()
+        for l in TEXTS:
+            for k in ("menu_report", "menu_map", "menu_route", "menu_help", "menu_lang", "send_loc"):
+                all_menu_btns.add(TEXTS[l].get(k, ""))
+        if text not in all_menu_btns:
+            await _handle_route_address(update, ctx, text)
+            return
 
     # Кнопки меню (на всех языках)
     # NB: кнопка «Добавить миклат» обрабатывается через ConversationHandler (report_conv)
@@ -3218,21 +3378,29 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     route_btns = {TEXTS[l].get("menu_route", "") for l in TEXTS}
     if text in route_btns:
         lang = (ctx.user_data or {}).get("lang", "ru")
-        # Если у юзера есть сохранённая локация — используем как точку A
         last_loc = ctx.user_data.get("last_location")
         if last_loc:
             ctx.user_data["route_start"] = last_loc
-            msg = {"ru": "📍 Точка А — твоя последняя геолокация.\n\n🏁 Отправь геолокацию назначения (точка Б):",
-                   "he": "📍 נקודה A — המיקום האחרון שלך.\n\n🏁 שלח מיקום יעד (נקודה B):",
-                   "en": "📍 Point A — your last location.\n\n🏁 Send destination location (point B):"}
-            await update.message.reply_text(msg.get(lang, msg["en"]))
-            return ROUTE_DEST
+            msg = {"ru": "📍 Точка А — твоя последняя геолокация.\n\n"
+                         "🏁 *Куда идёшь?*\n\n"
+                         "1️⃣ Напиши адрес:\n   `Дизенгоф 50, Тель-Авив`\n\n"
+                         "2️⃣ Или отправь точку:\n   📎 → Location → передвинь карту",
+                   "he": "📍 נקודה A — המיקום האחרון.\n\n"
+                         "🏁 *לאן?*\n\n"
+                         "1️⃣ כתוב כתובת:\n   `דיזנגוף 50, תל אביב`\n\n"
+                         "2️⃣ או שלח נקודה:\n   📎 → Location → הזז את המפה",
+                   "en": "📍 Point A — your last location.\n\n"
+                         "🏁 *Where to?*\n\n"
+                         "1️⃣ Type an address:\n   `Dizengoff 50, Tel Aviv`\n\n"
+                         "2️⃣ Or send a map point:\n   📎 → Location → move the map"}
+            await update.message.reply_text(msg.get(lang, msg["en"]), parse_mode=ParseMode.MARKDOWN)
+            ctx.user_data["awaiting_route_dest"] = True
         else:
             msg = {"ru": "📍 Сначала отправь свою геолокацию (точка А), потом нажми 🧭 ещё раз.",
                    "he": "📍 קודם שלח מיקום (נקודה A), אחר כך לחץ 🧭 שוב.",
                    "en": "📍 Send your location first (point A), then tap 🧭 again."}
             await update.message.reply_text(msg.get(lang, msg["en"]), reply_markup=get_location_kb(ctx))
-            return
+        return
 
     await update.message.reply_text(t(ctx, "send_loc_btn"), reply_markup=get_location_kb(ctx))
 
