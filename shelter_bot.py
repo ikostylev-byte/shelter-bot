@@ -63,6 +63,7 @@ _itm_to_wgs = True  # flag: ITM conversion available (always True now)
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "YOUR_TOKEN_HERE")
 DATABASE_URL = os.environ.get("DATABASE_URL", "").replace("postgres://", "postgresql://", 1)
 MAP_URL      = os.environ.get("MAP_URL", "")  # URL to hosted shelter map (map.html)
+ADMIN_ID     = int(os.environ.get("ADMIN_ID", "0"))  # Telegram user_id админа (для /broadcast)
 
 # ─── ИСТОЧНИКИ ДАННЫХ ────────────────────────────────────────────────────────
 # GovMap — государственный геопортал Израиля (POI слой, вся страна)
@@ -1328,6 +1329,16 @@ async def db_init():
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(shelter_id, user_id)
             )""")
+        # Все пользователи бота (для broadcast и статистики)
+        await c.execute("""
+            CREATE TABLE IF NOT EXISTS bot_users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                lang TEXT DEFAULT 'ru',
+                first_seen TIMESTAMPTZ DEFAULT NOW(),
+                last_seen TIMESTAMPTZ DEFAULT NOW()
+            )""")
     logger.info("DB ready")
 
 
@@ -1486,6 +1497,45 @@ async def load_user_lang(user_id):
     async with pool.acquire() as c:
         row = await c.fetchrow("SELECT lang FROM user_settings WHERE user_id=$1", user_id)
         return row["lang"] if row else "ru"
+
+
+async def track_user(user):
+    """Сохраняем/обновляем юзера в bot_users (вызывается при каждом взаимодействии)."""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as c:
+            await c.execute("""
+                INSERT INTO bot_users (user_id, username, first_name, last_seen)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    username = COALESCE($2, bot_users.username),
+                    first_name = COALESCE($3, bot_users.first_name),
+                    last_seen = NOW()
+            """, user.id, user.username, user.first_name)
+    except Exception:
+        pass  # не ломаем основной flow из-за трекинга
+
+
+async def get_all_user_ids():
+    """Возвращает список всех user_id для broadcast."""
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        rows = await c.fetch("SELECT user_id FROM bot_users ORDER BY last_seen DESC")
+        return [r["user_id"] for r in rows]
+
+
+async def get_user_stats():
+    """Статистика по юзерам."""
+    pool = await get_pool()
+    async with pool.acquire() as c:
+        total = await c.fetchval("SELECT COUNT(*) FROM bot_users")
+        today = await c.fetchval(
+            "SELECT COUNT(*) FROM bot_users WHERE last_seen > NOW() - INTERVAL '24 hours'")
+        week = await c.fetchval(
+            "SELECT COUNT(*) FROM bot_users WHERE last_seen > NOW() - INTERVAL '7 days'")
+        month = await c.fetchval(
+            "SELECT COUNT(*) FROM bot_users WHERE last_seen > NOW() - INTERVAL '30 days'")
+        return {"total": total, "today": today, "week": week, "month": month}
 
 
 # ─── GIS ──────────────────────────────────────────────────────────────────────
@@ -2555,6 +2605,7 @@ def generate_map(user_lat, user_lon, shelters) -> BytesIO:
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await track_user(update.effective_user)
     # Загружаем язык пользователя из БД
     try:
         lang = await load_user_lang(update.effective_user.id)
@@ -2607,6 +2658,7 @@ async def cb_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await track_user(update.effective_user)
     lat = update.message.location.latitude
     lon = update.message.location.longitude
     logger.info("Location: %s %s", lat, lon)
@@ -3186,6 +3238,76 @@ async def handle_route_destination(update: Update, ctx: ContextTypes.DEFAULT_TYP
     return True
 
 
+async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Статистика юзеров. Доступна всем (общая) или админу (подробная)."""
+    try:
+        stats = await get_user_stats()
+        lines = [
+            "📊 *Статистика*",
+            f"👥 Всего юзеров: {stats['total']}",
+            f"📅 Активны сегодня: {stats['today']}",
+            f"📅 За неделю: {stats['week']}",
+            f"📅 За месяц: {stats['month']}",
+        ]
+        # Подробности для админа
+        if ADMIN_ID and update.effective_user.id == ADMIN_ID:
+            pool = await get_pool()
+            async with pool.acquire() as c:
+                reviews_cnt = await c.fetchval("SELECT COUNT(*) FROM reviews")
+                reports_cnt = await c.fetchval("SELECT COUNT(*) FROM shelter_reports")
+                user_shelters_cnt = await c.fetchval("SELECT COUNT(*) FROM user_shelters")
+            lines.append(f"\n🔧 *Админ*")
+            lines.append(f"✍️ Отзывов: {reviews_cnt}")
+            lines.append(f"❌ Репортов: {reports_cnt}")
+            lines.append(f"📝 Юзерских убежищ: {user_shelters_cnt}")
+            lines.append(f"🚫 Скрыто: {len(_reported_shelters)}")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+
+
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Рассылка сообщения всем юзерам. Только для админа.
+    Использование: /broadcast Текст сообщения"""
+    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Admin only")
+        return
+
+    text = (update.message.text or "").replace("/broadcast", "", 1).strip()
+    if not text:
+        await update.message.reply_text(
+            "Использование: `/broadcast Ваше сообщение`\n\n"
+            "Поддерживает Markdown.", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    user_ids = await get_all_user_ids()
+    await update.message.reply_text(f"📤 Рассылка {len(user_ids)} юзерам...")
+
+    sent = 0
+    blocked = 0
+    errors = 0
+    for uid in user_ids:
+        try:
+            await ctx.bot.send_message(uid, text, parse_mode=ParseMode.MARKDOWN)
+            sent += 1
+        except Exception as e:
+            err_str = str(e).lower()
+            if "blocked" in err_str or "deactivated" in err_str or "not found" in err_str:
+                blocked += 1
+            else:
+                errors += 1
+        # Telegram rate limit: max 30 msg/sec
+        if sent % 25 == 0:
+            import time as _time
+            await asyncio.sleep(1.1)
+
+    await update.message.reply_text(
+        f"✅ Рассылка завершена:\n"
+        f"📨 Отправлено: {sent}\n"
+        f"🚫 Заблокировали бота: {blocked}\n"
+        f"❌ Ошибки: {errors}")
+
+
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error("Error: %s", ctx.error, exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_message:
@@ -3488,6 +3610,37 @@ def main():
     try:
         asyncio.get_event_loop().run_until_complete(db_init())
         asyncio.get_event_loop().run_until_complete(load_reported_shelters())
+        # Бэкфилл: переносим юзеров из старых таблиц в bot_users
+        async def _backfill_users():
+            try:
+                pool = await get_pool()
+                async with pool.acquire() as c:
+                    await c.execute("""
+                        INSERT INTO bot_users (user_id, username, last_seen)
+                        SELECT user_id, username, COALESCE(MAX(created_at), NOW())
+                        FROM (
+                            SELECT user_id, username, created_at FROM reviews
+                            UNION ALL
+                            SELECT user_id, username, checked_in_at FROM checkins
+                            UNION ALL
+                            SELECT user_id, username, created_at FROM user_shelters
+                            UNION ALL
+                            SELECT user_id, NULL, created_at FROM shelter_reports
+                        ) t GROUP BY user_id, username
+                        ON CONFLICT (user_id) DO NOTHING
+                    """)
+                    # Также из user_settings
+                    await c.execute("""
+                        INSERT INTO bot_users (user_id)
+                        SELECT user_id FROM user_settings
+                        ON CONFLICT (user_id) DO NOTHING
+                    """)
+                    cnt = await c.fetchval("SELECT COUNT(*) FROM bot_users")
+                    if cnt:
+                        logger.info("bot_users: %d users tracked", cnt)
+            except Exception as e:
+                logger.warning("Backfill users: %s", e)
+        asyncio.get_event_loop().run_until_complete(_backfill_users())
     except Exception as e:
         logger.error("DB init failed: %s", e)
 
@@ -3522,11 +3675,13 @@ def main():
     )
 
     app.add_handler(report_conv)
-    app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("ping",   cmd_ping))
-    app.add_handler(CommandHandler("diag",   cmd_diag))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("lang",   cmd_lang))
+    app.add_handler(CommandHandler("start",     start))
+    app.add_handler(CommandHandler("ping",      cmd_ping))
+    app.add_handler(CommandHandler("diag",      cmd_diag))
+    app.add_handler(CommandHandler("stats",     cmd_stats))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("status",    cmd_status))
+    app.add_handler(CommandHandler("lang",      cmd_lang))
     app.add_handler(review_conv)
     app.add_handler(CallbackQueryHandler(cb_lang,           pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(cb_select_shelter, pattern=r"^select:"))
