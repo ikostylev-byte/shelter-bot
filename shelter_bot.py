@@ -2575,6 +2575,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=lang_kb,
     )
+    # Показываем основную клавиатуру сразу (обновляет кнопки если были старые)
+    await update.message.reply_text("👇", reply_markup=get_location_kb(ctx))
 
 
 async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3154,14 +3156,15 @@ async def handle_route_destination(update: Update, ctx: ContextTypes.DEFAULT_TYP
             d = round(haversine(path[i-1]["lat"], path[i-1]["lon"], p["lat"], p["lon"]))
             lines.append(f"  {i}. 🛡️ {addr} ({d}м)")
 
-    # Кнопка навигации: Google Maps через все waypoints
+    # Кнопки навигации: Google Maps + Waze через waypoints
     waypoints = "|".join(f"{p['lat']},{p['lon']}" for p in path[1:-1][:8])  # max 8 waypoints
     gmaps_url = (f"https://www.google.com/maps/dir/?api=1"
                  f"&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
                  f"&waypoints={waypoints}&travelmode=walking")
-    nav_label = {"ru": "🗺️ Открыть в Google Maps", "he": "🗺️ פתח ב-Google Maps", "en": "🗺️ Open in Google Maps"}
+    waze_url = f"https://waze.com/ul?ll={lat_b},{lon_b}&from={lat_a},{lon_a}&navigate=yes"
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(nav_label.get(lang, nav_label["en"]), url=gmaps_url)
+        InlineKeyboardButton("🗺️ Google Maps", url=gmaps_url),
+        InlineKeyboardButton("🚗 Waze", url=waze_url),
     ]])
 
     if map_buf:
@@ -3312,9 +3315,10 @@ async def _handle_route_address(update: Update, ctx: ContextTypes.DEFAULT_TYPE, 
     gmaps_url = (f"https://www.google.com/maps/dir/?api=1"
                  f"&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
                  f"&waypoints={waypoints}&travelmode=walking")
-    nav_label = {"ru": "🗺️ Открыть в Google Maps", "he": "🗺️ פתח ב-Google Maps", "en": "🗺️ Open in Google Maps"}
+    waze_url = f"https://waze.com/ul?ll={lat_b},{lon_b}&from={lat_a},{lon_a}&navigate=yes"
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(nav_label.get(lang, nav_label["en"]), url=gmaps_url)
+        InlineKeyboardButton("🗺️ Google Maps", url=gmaps_url),
+        InlineKeyboardButton("🚗 Waze", url=waze_url),
     ]])
 
     if map_buf:
@@ -3396,9 +3400,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg.get(lang, msg["en"]), parse_mode=ParseMode.MARKDOWN)
             ctx.user_data["awaiting_route_dest"] = True
         else:
-            msg = {"ru": "📍 Сначала отправь свою геолокацию (точка А), потом нажми 🧭 ещё раз.",
-                   "he": "📍 קודם שלח מיקום (נקודה A), אחר כך לחץ 🧭 שוב.",
-                   "en": "📍 Send your location first (point A), then tap 🧭 again."}
+            msg = {"ru": "📍 Нажми кнопку «📍 Отправить геолокацию» выше — это будет точка А.\n"
+                         "Потом нажми 🧭 ещё раз.",
+                   "he": "📍 לחץ על «📍 שלח מיקום» למעלה — זו תהיה נקודה A.\n"
+                         "אחר כך לחץ 🧭 שוב.",
+                   "en": "📍 Tap «📍 Send location» button above — that's point A.\n"
+                         "Then tap 🧭 again."}
             await update.message.reply_text(msg.get(lang, msg["en"]), reply_markup=get_location_kb(ctx))
         return
 
