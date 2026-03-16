@@ -2720,8 +2720,8 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Кнопки выбора
     buttons = []
     for i, s in enumerate(shelters, 1):
-        waze_url = f"https://waze.com/ul?ll={s['lat']},{s['lon']}&navigate=yes"
-        gmaps_url = f"https://maps.google.com/maps?daddr={s['lat']},{s['lon']}"
+        waze_url = f"https://ul.waze.com/ul?ll={s['lat']},{s['lon']}&navigate=yes&zoom=17"
+        gmaps_url = f"https://www.google.com/maps/dir/?api=1&destination={s['lat']},{s['lon']}&travelmode=walking"
         label = s['address'][:28] if s['address'] else s['name'][:28]
         buttons.append([
             InlineKeyboardButton(f"#{i} {label}", callback_data=f"select:{i-1}"),
@@ -3195,7 +3195,9 @@ async def handle_route_destination(update: Update, ctx: ContextTypes.DEFAULT_TYP
         lines.append(line)
 
     lines.append("")
-    step_hdr = {"ru": "📋 *Маршрут:*", "he": "📋 *מסלול:*", "en": "📋 *Route:*"}
+    step_hdr = {"ru": "📋 *Маршрут* (тап на убежище = навигация):",
+                "he": "📋 *מסלול* (לחץ על מקלט = ניווט):",
+                "en": "📋 *Route* (tap shelter = navigate):"}
     lines.append(step_hdr.get(lang, step_hdr["en"]))
 
     for i, p in enumerate(path):
@@ -3206,18 +3208,20 @@ async def handle_route_destination(update: Update, ctx: ContextTypes.DEFAULT_TYP
             lines.append(f"🟠 B: {addr}")
         else:
             d = round(haversine(path[i-1]["lat"], path[i-1]["lon"], p["lat"], p["lon"]))
-            lines.append(f"  {i}. 🛡️ {addr} ({d}м)")
+            nav = f"https://www.google.com/maps/dir/?api=1&destination={p['lat']},{p['lon']}&travelmode=walking"
+            lines.append(f"  {i}. 🛡️ [{addr}]({nav}) ({d}м)")
 
-    # Кнопки навигации: Google Maps + Waze через waypoints
-    waypoints = "|".join(f"{p['lat']},{p['lon']}" for p in path[1:-1][:8])  # max 8 waypoints
+    # Одна кнопка: полный маршрут через все убежища пешком
+    waypoints = "|".join(f"{p['lat']},{p['lon']}" for p in path[1:-1][:8])
     gmaps_url = (f"https://www.google.com/maps/dir/?api=1"
                  f"&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
                  f"&waypoints={waypoints}&travelmode=walking")
-    waze_url = f"https://waze.com/ul?ll={lat_b},{lon_b}&from={lat_a},{lon_a}&navigate=yes"
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗺️ Google Maps", url=gmaps_url),
-        InlineKeyboardButton("🚗 Waze", url=waze_url),
-    ]])
+    nav_label = {"ru": "🚶 Открыть маршрут в Google Maps",
+                 "he": "🚶 פתח מסלול ב-Google Maps",
+                 "en": "🚶 Open route in Google Maps"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(nav_label.get(lang, nav_label["en"]), url=gmaps_url)],
+    ])
 
     if map_buf:
         await update.message.reply_photo(
@@ -3423,6 +3427,10 @@ async def _handle_route_address(update: Update, ctx: ContextTypes.DEFAULT_TYPE, 
         lines.append(line)
 
     lines.append("")
+    step_hdr = {"ru": "📋 *Маршрут* (тап на убежище = навигация):",
+                "he": "📋 *מסלול* (לחץ על מקלט = ניווט):",
+                "en": "📋 *Route* (tap shelter = navigate):"}
+    lines.append(step_hdr.get(lang, step_hdr["en"]))
     for i, p in enumerate(path):
         addr = p["addr"][:35] if p.get("addr") else "—"
         if i == 0:
@@ -3431,17 +3439,19 @@ async def _handle_route_address(update: Update, ctx: ContextTypes.DEFAULT_TYPE, 
             lines.append(f"🟠 B: {resolved_addr[:35]}")
         else:
             d = round(haversine(path[i-1]["lat"], path[i-1]["lon"], p["lat"], p["lon"]))
-            lines.append(f"  {i}. 🛡️ {addr} ({d}м)")
+            nav = f"https://www.google.com/maps/dir/?api=1&destination={p['lat']},{p['lon']}&travelmode=walking"
+            lines.append(f"  {i}. 🛡️ [{addr}]({nav}) ({d}м)")
 
     waypoints = "|".join(f"{p['lat']},{p['lon']}" for p in path[1:-1][:8])
     gmaps_url = (f"https://www.google.com/maps/dir/?api=1"
                  f"&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
                  f"&waypoints={waypoints}&travelmode=walking")
-    waze_url = f"https://waze.com/ul?ll={lat_b},{lon_b}&from={lat_a},{lon_a}&navigate=yes"
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🗺️ Google Maps", url=gmaps_url),
-        InlineKeyboardButton("🚗 Waze", url=waze_url),
-    ]])
+    nav_label = {"ru": "🚶 Открыть маршрут в Google Maps",
+                 "he": "🚶 פתח מסלול ב-Google Maps",
+                 "en": "🚶 Open route in Google Maps"}
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(nav_label.get(lang, nav_label["en"]), url=gmaps_url)],
+    ])
 
     if map_buf:
         await update.message.reply_photo(photo=map_buf, caption="\n".join(lines),
