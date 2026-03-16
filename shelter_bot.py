@@ -1086,6 +1086,7 @@ TA_BOUNDS = {"lat_min": 32.03, "lat_max": 32.15, "lon_min": 34.74, "lon_max": 34
 
 REVIEW_TEXT, REVIEW_PHOTO = range(2)
 REPORT_LOCATION, REPORT_DESC = range(10, 12)
+ROUTE_DEST = 20  # ожидание точки назначения для безопасного маршрута
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1097,9 +1098,10 @@ TEXTS = {
         "searching": "⏳ Ищу ближайшие убежища...",
         "menu_report": "📝 Добавить миклат",
         "menu_map":    "🗺 Карта",
+        "menu_route":  "🧭 Маршрут",
         "menu_lang":   "🌐 Язык",
         "menu_help":   "❓ Помощь",
-        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~18,500 убежищ по стране",
+        "help_text":   "🛡️ *ялла, миклат!*\n\n📍 Геолокация — ближайшие убежища\n📝 Добавить — нашёл новый? Добавь в базу\n🌐 Язык — сменить язык\n✍️ Отзыв — оставь отзыв\n🤝 Иду сюда — отметься\n🧭 Маршрут — безопасный путь через убежища\n\nИсточники: пикуд а-ореф, муниципальные GIS, OSM\nВсего ~18,800 убежищ по стране",
         "welcome":      "🛡️ *ялла, миклат!*\n\nОтправь геолокацию — покажу ближайшие убежища.\n\nНашёл миклат, которого нет в базе? → /report",
         "send_loc":     "📍 Отправить геолокацию",
         "no_shelters":  "😔 Убежищ в радиусе {radius} м не найдено.\nКоординаты: {lat:.5f}, {lon:.5f}\n\nПопробуй увеличить радиус /radius или поискать на Google Maps: מקלט ציבורי",
@@ -1144,9 +1146,10 @@ TEXTS = {
         "searching": "⏳ מחפש מקלטים קרובים...",
         "menu_report": "📝 הוסף מקלט",
         "menu_map":    "🗺 מפה",
+        "menu_route":  "🧭 מסלול בטוח",
         "menu_lang":   "🌐 שפה",
         "menu_help":   "❓ עזרה",
-        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~18,500 מקלטים",
+        "help_text":   "🛡️ *!יאללה, מקלט*\n\n📍 שלח מיקום — מקלטים קרובים\n📝 הוסף — מצאת חדש? הוסף למאגר\n🌐 שפה — החלף שפה\n✍️ ביקורת — השאר ביקורת\n🤝 בדרך — סמן הגעה\n🧭 מסלול — מסלול בטוח דרך מקלטים\n\nמקורות: פיקוד העורף, GIS עירוני, OSM\nסה\"כ ~18,800 מקלטים",
         "welcome":      "🛡️ *יאללה, מקלט!*\n\nשלח מיקום — אראה לך את המקלטים הקרובים.\n\nמצאת מקלט שלא נמצא? → /report",
         "send_loc":     "📍 שלח מיקום",
         "no_shelters":  "😔 לא נמצאו מקלטים ברדיוס {radius} מ'.\nקואורדינטות: {lat:.5f}, {lon:.5f}\n\nחפש ב-Google Maps: מקלט ציבורי",
@@ -1191,9 +1194,10 @@ TEXTS = {
         "searching": "⏳ Searching nearby shelters...",
         "menu_report": "📝 Add shelter",
         "menu_map":    "🗺 Map",
+        "menu_route":  "🧭 Safe route",
         "menu_lang":   "🌐 Language",
         "menu_help":   "❓ Help",
-        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~18,500 shelters",
+        "help_text":   "🛡️ *Yalla, Miklat!*\n\n📍 Location — find nearby shelters\n📝 Add — found one? Add to database\n🌐 Language — change language\n✍️ Review — leave review\n🤝 Going — check in\n🧭 Route — safe path through shelters\n\nSources: Pikud HaOref, municipal GIS, OSM\nTotal ~18,800 shelters",
         "welcome":      "🛡️ *Yalla, Miklat!*\n\nSend your location — I'll show the nearest shelters.\n\nFound a shelter not in our database? → /report",
         "send_loc":     "📍 Send location",
         "no_shelters":  "😔 No shelters within {radius} m.\nCoords: {lat:.5f}, {lon:.5f}\n\nTry Google Maps: מקלט ציבורי nearby",
@@ -1250,8 +1254,8 @@ def get_location_kb(ctx):
     tx = TEXTS.get(lang, TEXTS["ru"])
     return ReplyKeyboardMarkup([
         [KeyboardButton(tx["send_loc"], request_location=True)],
-        [tx["menu_report"], tx["menu_map"], tx["menu_help"]],
-        [tx["menu_lang"]],
+        [tx["menu_report"], tx["menu_map"], tx["menu_route"]],
+        [tx["menu_help"], tx["menu_lang"]],
     ], resize_keyboard=True, one_time_keyboard=False)
 
 
@@ -2349,6 +2353,166 @@ async def fetch_shelters_all_async(lat, lon):
     return all_shelters[:MAX_RESULTS]
 
 
+# ─── БЕЗОПАСНЫЙ МАРШРУТ (Dijkstra через убежища) ─────────────────────────────
+
+def _get_safe_radius(lat, lon):
+    """Время на укрытие → макс. расстояние до убежища (метры).
+    Зоны по данным пикуд а-ореф × 3 м/с (бег)."""
+    # Gaza envelope: 15 сек
+    if lat < 31.55 and lon < 34.65: return 45
+    # South (Ashkelon/Ashdod): 30 сек
+    if lat < 31.75 and lon < 34.70: return 90
+    # North border (Kiryat Shmona): 0-15 сек
+    if lat > 33.10: return 45
+    # Haifa area: 60 сек
+    if 32.70 < lat < 32.90 and 34.90 < lon < 35.15: return 180
+    # Center (TA, Jerusalem, Beer Sheva): 90 сек
+    return 270
+
+
+def compute_safe_route(lat_a, lon_a, lat_b, lon_b, safe_radius=None):
+    """Строит безопасный маршрут от A к B через убежища.
+    Гарантия: в любой точке пути ты в ≤safe_radius от убежища.
+    Возвращает (path, stats) или (None, error_msg)."""
+    import heapq
+
+    if safe_radius is None:
+        mid_lat = (lat_a + lat_b) / 2
+        mid_lon = (lon_a + lon_b) / 2
+        safe_radius = _get_safe_radius(mid_lat, mid_lon)
+
+    max_edge = safe_radius * 2  # макс. расстояние между убежищами
+
+    # 1. Собираем убежища в коридоре A→B
+    corridor_width = max(safe_radius * 3, 500)  # расширенная полоса для обходов
+    direct_dist = haversine(lat_a, lon_a, lat_b, lon_b)
+
+    min_lat = min(lat_a, lat_b) - corridor_width / 111000
+    max_lat = max(lat_a, lat_b) + corridor_width / 111000
+    cos_lat = math.cos(math.radians((lat_a + lat_b) / 2))
+    min_lon = min(lon_a, lon_b) - corridor_width / (111000 * cos_lat)
+    max_lon = max(lon_a, lon_b) + corridor_width / (111000 * cos_lat)
+
+    # Точки из grid
+    shelters = []
+    for i, m in enumerate(_MIKLAT_DATA):
+        lat, lon = m[1], m[0]
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            addr = m[2] if len(m) > 2 else ""
+            shelters.append({"idx": i, "lat": lat, "lon": lon, "addr": addr})
+
+    if not shelters:
+        return None, {"error": "no_shelters", "safe_radius": safe_radius}
+
+    # 2. Узлы: [A] + shelters + [B]
+    nodes = [{"lat": lat_a, "lon": lon_a, "addr": "📍 Start", "idx": -1}]
+    nodes.extend(shelters)
+    nodes.append({"lat": lat_b, "lon": lon_b, "addr": "🏁 End", "idx": -2})
+    n = len(nodes)
+
+    # 3. Строим adjacency list
+    adj = [[] for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = haversine(nodes[i]["lat"], nodes[i]["lon"],
+                         nodes[j]["lat"], nodes[j]["lon"])
+            if d <= max_edge:
+                adj[i].append((j, d))
+                adj[j].append((i, d))
+
+    # 4. Dijkstra
+    INF = float('inf')
+    dist_arr = [INF] * n
+    dist_arr[0] = 0
+    prev = [-1] * n
+    pq = [(0, 0)]
+
+    while pq:
+        d, u = heapq.heappop(pq)
+        if d > dist_arr[u]:
+            continue
+        if u == n - 1:
+            break
+        for v, w in adj[u]:
+            nd = d + w
+            if nd < dist_arr[v]:
+                dist_arr[v] = nd
+                prev[v] = u
+                heapq.heappush(pq, (nd, v))
+
+    if dist_arr[n - 1] == INF:
+        # Не нашли путь — пробуем с увеличенным радиусом
+        if safe_radius < 600:
+            return compute_safe_route(lat_a, lon_a, lat_b, lon_b, safe_radius=safe_radius * 2)
+        return None, {"error": "no_path", "safe_radius": safe_radius, "shelters_in_corridor": len(shelters)}
+
+    # 5. Восстанавливаем путь
+    path = []
+    u = n - 1
+    while u != -1:
+        path.append(nodes[u])
+        u = prev[u]
+    path.reverse()
+
+    # 6. Статистика
+    route_dist = sum(
+        haversine(path[i]["lat"], path[i]["lon"], path[i+1]["lat"], path[i+1]["lon"])
+        for i in range(len(path) - 1)
+    )
+    shelters_on_path = len(path) - 2  # без A и B
+    detour_pct = (route_dist / direct_dist - 1) * 100 if direct_dist > 0 else 0
+
+    # Макс. расстояние между точками пути (= макс. "дыра" в покрытии)
+    max_gap = max(
+        haversine(path[i]["lat"], path[i]["lon"], path[i+1]["lat"], path[i+1]["lon"])
+        for i in range(len(path) - 1)
+    )
+
+    stats = {
+        "direct_dist": round(direct_dist),
+        "route_dist": round(route_dist),
+        "shelters_on_path": shelters_on_path,
+        "detour_pct": round(detour_pct),
+        "safe_radius": safe_radius,
+        "max_gap": round(max_gap),
+        "total_shelters_in_corridor": len(shelters),
+    }
+
+    return path, stats
+
+
+def generate_route_map(path, user_lat=None, user_lon=None) -> 'BytesIO':
+    """Рисует карту маршрута: зелёная линия через убежища + маркеры."""
+    from staticmap import Line
+    m = StaticMap(900, 700,
+                  url_template="https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png")
+
+    # Линия маршрута (зелёная)
+    for i in range(len(path) - 1):
+        p1 = (path[i]["lon"], path[i]["lat"])
+        p2 = (path[i+1]["lon"], path[i+1]["lat"])
+        m.add_line(Line([p1, p2], "#1D9E75", 4))
+
+    # Убежища на маршруте — красные точки
+    for p in path[1:-1]:
+        m.add_marker(CircleMarker((p["lon"], p["lat"]), "#C0392B", 22))
+        m.add_marker(CircleMarker((p["lon"], p["lat"]), "white", 13))
+
+    # Start — синий
+    m.add_marker(CircleMarker((path[0]["lon"], path[0]["lat"]), "#2471A3", 28))
+    m.add_marker(CircleMarker((path[0]["lon"], path[0]["lat"]), "white", 18))
+
+    # End — оранжевый
+    m.add_marker(CircleMarker((path[-1]["lon"], path[-1]["lat"]), "#E67E22", 28))
+    m.add_marker(CircleMarker((path[-1]["lon"], path[-1]["lat"]), "white", 18))
+
+    image = m.render()
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
 # ─── КАРТА ────────────────────────────────────────────────────────────────────
 
 def generate_map(user_lat, user_lon, shelters) -> BytesIO:
@@ -2445,6 +2609,7 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lat = update.message.location.latitude
     lon = update.message.location.longitude
     logger.info("Location: %s %s", lat, lon)
+    ctx.user_data["last_location"] = (lat, lon)
 
     # Загружаем язык если ещё не загружен
     if "lang" not in ctx.user_data:
@@ -2452,6 +2617,12 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data["lang"] = await load_user_lang(update.effective_user.id)
         except:
             ctx.user_data["lang"] = "ru"
+
+    # Перехват: если ждём точку Б для маршрута
+    if ctx.user_data.get("awaiting_route_dest"):
+        handled = await handle_route_destination(update, ctx)
+        if handled:
+            return
 
     lang = ctx.user_data.get("lang", "ru")
 
@@ -2506,6 +2677,12 @@ async def handle_location(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🚗 Waze", url=waze_url),
             InlineKeyboardButton("🗺️ Google Maps", url=gmaps_url),
         ])
+    kb = InlineKeyboardMarkup(buttons)
+
+    # Кнопка "Маршрут отсюда" — сохраняет текущую локацию как точку А
+    route_label = {"ru": "🧭 Маршрут отсюда", "he": "🧭 מסלול בטוח מכאן", "en": "🧭 Safe route from here"}
+    buttons.append([InlineKeyboardButton(route_label.get(lang, route_label["en"]),
+                                          callback_data="route_start")])
     kb = InlineKeyboardMarkup(buttons)
 
     # Карта + кнопки
@@ -2856,6 +3033,145 @@ async def cmd_diag(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(msg_lines), parse_mode=ParseMode.MARKDOWN)
 
 
+# ─── БЕЗОПАСНЫЙ МАРШРУТ: handlers ────────────────────────────────────────────
+
+async def cb_route_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Юзер нажал 🧭 Маршрут отсюда — сохраняем точку А, просим точку Б."""
+    query = update.callback_query
+    await query.answer()
+    lang = ctx.user_data.get("lang", "ru")
+    last_loc = ctx.user_data.get("last_location")
+    if not last_loc:
+        msg = {"ru": "📍 Сначала отправь геолокацию.", "he": "📍 שלח מיקום קודם.", "en": "📍 Send location first."}
+        await query.message.reply_text(msg.get(lang, msg["en"]), reply_markup=get_location_kb(ctx))
+        return
+    ctx.user_data["route_start"] = last_loc
+    msg = {"ru": "✅ Точка А сохранена!\n\n🏁 Теперь отправь геолокацию назначения (точка Б).\n\n"
+                 "💡 Совет: зажми палец на карте в Telegram, чтобы отправить произвольную точку.",
+           "he": "✅ נקודה A נשמרה!\n\n🏁 שלח מיקום יעד (נקודה B).\n\n"
+                 "💡 טיפ: לחיצה ארוכה על המפה בטלגרם לשליחת נקודה.",
+           "en": "✅ Point A saved!\n\n🏁 Now send destination location (point B).\n\n"
+                 "💡 Tip: long-press on the map in Telegram to send any point."}
+    await query.message.reply_text(msg.get(lang, msg["en"]))
+    ctx.user_data["awaiting_route_dest"] = True
+
+
+async def handle_route_destination(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Получили точку Б — строим безопасный маршрут."""
+    if not ctx.user_data.get("awaiting_route_dest"):
+        return False  # не в режиме маршрута
+
+    lat_b = update.message.location.latitude
+    lon_b = update.message.location.longitude
+    ctx.user_data["awaiting_route_dest"] = False
+
+    start = ctx.user_data.get("route_start")
+    if not start:
+        return False
+
+    lat_a, lon_a = start
+    lang = ctx.user_data.get("lang", "ru")
+
+    searching = {"ru": "🧭 Строю безопасный маршрут...", "he": "🧭 בונה מסלול בטוח...", "en": "🧭 Building safe route..."}
+    wait_msg = await update.message.reply_text(searching.get(lang, searching["en"]))
+
+    try:
+        path, stats = await asyncio.to_thread(compute_safe_route, lat_a, lon_a, lat_b, lon_b)
+    except Exception as e:
+        logger.error("Route error: %s", e, exc_info=True)
+        await wait_msg.edit_text(f"❌ Error: {e}")
+        return True
+
+    if path is None:
+        err = stats.get("error", "unknown") if isinstance(stats, dict) else str(stats)
+        msg = {"ru": f"❌ Не удалось построить безопасный маршрут.\n"
+                     f"Недостаточно убежищ в коридоре между точками.",
+               "he": f"❌ לא ניתן לבנות מסלול בטוח.\nאין מספיק מקלטים במסדרון.",
+               "en": f"❌ Could not build safe route.\nNot enough shelters in the corridor."}
+        await wait_msg.edit_text(msg.get(lang, msg["en"]))
+        return True
+
+    # Генерируем карту
+    try:
+        map_buf = await asyncio.to_thread(generate_route_map, path)
+    except Exception as e:
+        logger.error("Route map error: %s", e, exc_info=True)
+        map_buf = None
+
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+
+    # Текст маршрута
+    n_shelters = stats["shelters_on_path"]
+    lines = []
+    header = {"ru": "🧭 *Безопасный маршрут*",
+              "he": "🧭 *מסלול בטוח*",
+              "en": "🧭 *Safe route*"}
+    lines.append(header.get(lang, header["en"]))
+    lines.append("")
+
+    stat_labels = {
+        "ru": (f"📏 Прямая: {stats['direct_dist']}м → Маршрут: {stats['route_dist']}м (+{stats['detour_pct']}%)",
+               f"🛡️ Убежищ по пути: {n_shelters}",
+               f"⚡ Зона укрытия: {stats['safe_radius']}м",
+               f"📐 Макс. промежуток: {stats['max_gap']}м"),
+        "he": (f"📏 ישיר: {stats['direct_dist']}מ → מסלול: {stats['route_dist']}מ (+{stats['detour_pct']}%)",
+               f"🛡️ מקלטים בדרך: {n_shelters}",
+               f"⚡ רדיוס בטוח: {stats['safe_radius']}מ",
+               f"📐 פער מקסימלי: {stats['max_gap']}מ"),
+        "en": (f"📏 Direct: {stats['direct_dist']}m → Route: {stats['route_dist']}m (+{stats['detour_pct']}%)",
+               f"🛡️ Shelters on path: {n_shelters}",
+               f"⚡ Safe radius: {stats['safe_radius']}m",
+               f"📐 Max gap: {stats['max_gap']}m"),
+    }
+    for line in stat_labels.get(lang, stat_labels["en"]):
+        lines.append(line)
+
+    lines.append("")
+    step_hdr = {"ru": "📋 *Маршрут:*", "he": "📋 *מסלול:*", "en": "📋 *Route:*"}
+    lines.append(step_hdr.get(lang, step_hdr["en"]))
+
+    for i, p in enumerate(path):
+        addr = p["addr"][:35] if p.get("addr") else "—"
+        if i == 0:
+            lines.append(f"🔵 A: {addr}")
+        elif i == len(path) - 1:
+            lines.append(f"🟠 B: {addr}")
+        else:
+            d = round(haversine(path[i-1]["lat"], path[i-1]["lon"], p["lat"], p["lon"]))
+            lines.append(f"  {i}. 🛡️ {addr} ({d}м)")
+
+    # Кнопка навигации: Google Maps через все waypoints
+    waypoints = "|".join(f"{p['lat']},{p['lon']}" for p in path[1:-1][:8])  # max 8 waypoints
+    gmaps_url = (f"https://www.google.com/maps/dir/?api=1"
+                 f"&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
+                 f"&waypoints={waypoints}&travelmode=walking")
+    nav_label = {"ru": "🗺️ Открыть в Google Maps", "he": "🗺️ פתח ב-Google Maps", "en": "🗺️ Open in Google Maps"}
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(nav_label.get(lang, nav_label["en"]), url=gmaps_url)
+    ]])
+
+    if map_buf:
+        await update.message.reply_photo(
+            photo=map_buf,
+            caption="\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb,
+        )
+    else:
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb,
+        )
+
+    logger.info("Route: %dm direct, %dm route, %d shelters, safe_r=%dm",
+                stats["direct_dist"], stats["route_dist"], n_shelters, stats["safe_radius"])
+    return True
+
+
 async def global_error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error("Error: %s", ctx.error, exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_message:
@@ -2898,6 +3214,25 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("🗺 Map coming soon!\nSet MAP_URL env var.", reply_markup=get_location_kb(ctx))
         return
+
+    route_btns = {TEXTS[l].get("menu_route", "") for l in TEXTS}
+    if text in route_btns:
+        lang = (ctx.user_data or {}).get("lang", "ru")
+        # Если у юзера есть сохранённая локация — используем как точку A
+        last_loc = ctx.user_data.get("last_location")
+        if last_loc:
+            ctx.user_data["route_start"] = last_loc
+            msg = {"ru": "📍 Точка А — твоя последняя геолокация.\n\n🏁 Отправь геолокацию назначения (точка Б):",
+                   "he": "📍 נקודה A — המיקום האחרון שלך.\n\n🏁 שלח מיקום יעד (נקודה B):",
+                   "en": "📍 Point A — your last location.\n\n🏁 Send destination location (point B):"}
+            await update.message.reply_text(msg.get(lang, msg["en"]))
+            return ROUTE_DEST
+        else:
+            msg = {"ru": "📍 Сначала отправь свою геолокацию (точка А), потом нажми 🧭 ещё раз.",
+                   "he": "📍 קודם שלח מיקום (נקודה A), אחר כך לחץ 🧭 שוב.",
+                   "en": "📍 Send your location first (point A), then tap 🧭 again."}
+            await update.message.reply_text(msg.get(lang, msg["en"]), reply_markup=get_location_kb(ctx))
+            return
 
     await update.message.reply_text(t(ctx, "send_loc_btn"), reply_markup=get_location_kb(ctx))
 
@@ -3022,6 +3357,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_select_shelter, pattern=r"^select:"))
     app.add_handler(CallbackQueryHandler(cb_back,           pattern=r"^back$"))
     app.add_handler(CallbackQueryHandler(cb_report_shelter,  pattern=r"^report:"))
+    app.add_handler(CallbackQueryHandler(cb_route_start,     pattern=r"^route_start$"))
     app.add_handler(CallbackQueryHandler(cb_checkin,        pattern=r"^checkin:"))
     app.add_handler(CallbackQueryHandler(cb_checkout,       pattern=r"^checkout$"))
     app.add_handler(MessageHandler(filters.LOCATION, handle_location))
