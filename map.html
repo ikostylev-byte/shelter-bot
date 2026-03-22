@@ -26,6 +26,24 @@
     margin-right: auto;
   }
 
+  /* Legend */
+  #legend {
+    position: fixed; bottom: 88px; left: 12px; z-index: 1000;
+    background: rgba(255,255,255,0.95); backdrop-filter: blur(8px);
+    padding: 8px 12px; border-radius: 10px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    font-size: 12px; color: #475569; direction: ltr;
+    line-height: 1.6;
+  }
+  #legend .dot {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-left: 4px; vertical-align: middle;
+    border: 1.5px solid white; box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  }
+  #legend .dot-oref { background: #2563eb; }
+  #legend .dot-other { background: #f59e0b; }
+  #legend .dot-user { background: #10b981; }
+
   /* Locate button */
   #locate-btn {
     position: fixed; bottom: 24px; right: 16px; z-index: 1000;
@@ -54,6 +72,12 @@
   #info .handle { width: 36px; height: 4px; background: #cbd5e1; border-radius: 2px; margin: 0 auto 12px; }
   #info .addr { font-size: 17px; font-weight: 600; color: #1e293b; margin-bottom: 4px; }
   #info .meta { font-size: 14px; color: #64748b; margin-bottom: 8px; }
+  #info .source-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 12px; font-weight: 600; margin-bottom: 8px;
+  }
+  #info .source-oref { background: #dbeafe; color: #1d4ed8; }
+  #info .source-other { background: #fef3c7; color: #92400e; }
   #info .dist { display: inline-block; background: #eff6ff; color: #2563eb; padding: 2px 8px; border-radius: 10px; font-size: 13px; font-weight: 600; }
   #info .nav-btn {
     display: inline-flex; align-items: center; gap: 6px;
@@ -62,10 +86,37 @@
     font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none;
   }
   #info .nav-btn:hover { background: #1d4ed8; }
+  #info .waze-btn {
+    background: #33ccff; color: #1a1a2e;
+  }
+  #info .waze-btn:hover { background: #29b8e8; }
   #info .close-btn {
     position: absolute; top: 12px; left: 12px;
     background: none; border: none; font-size: 22px; color: #94a3b8; cursor: pointer;
   }
+
+  /* Disclaimer overlay */
+  #disclaimer {
+    position: fixed; inset: 0; z-index: 3000;
+    background: rgba(0,0,0,0.6); display: flex;
+    align-items: center; justify-content: center;
+    padding: 16px;
+  }
+  #disclaimer.hide { display: none; }
+  #disclaimer .box {
+    background: white; border-radius: 16px; padding: 24px;
+    max-width: 420px; width: 100%; max-height: 80vh; overflow-y: auto;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+    direction: ltr; text-align: left;
+  }
+  #disclaimer h2 { font-size: 18px; margin-bottom: 12px; color: #dc2626; }
+  #disclaimer p { font-size: 14px; color: #475569; line-height: 1.6; margin-bottom: 8px; }
+  #disclaimer .accept-btn {
+    display: block; width: 100%; margin-top: 16px; padding: 12px;
+    background: #2563eb; color: white; border: none; border-radius: 10px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  #disclaimer .accept-btn:hover { background: #1d4ed8; }
 
   /* Cluster colors */
   .marker-cluster-small { background-color: rgba(37,99,235,0.2); }
@@ -95,6 +146,20 @@
   <p>טוען מקלטים...</p>
 </div>
 
+<!-- Disclaimer -->
+<div id="disclaimer" class="hide">
+  <div class="box">
+    <h2>⚠️ Terms of Use</h2>
+    <p><strong>Yalla, Shelter!</strong> is an informational service. Shelter data is collected from open sources (Pikud HaOref, municipal GIS, OpenStreetMap, crowdsourcing).</p>
+    <p>• The developer <strong>does not guarantee</strong> the accuracy, completeness, or timeliness of the data.</p>
+    <p>• The developer <strong>bears no responsibility</strong> for any consequences of using the service.</p>
+    <p>• You use the service <strong>at your own risk</strong>.</p>
+    <p>• <strong>Prioritize</strong> Pikud HaOref / municipal shelters (🛡️ blue markers) — they are from official sources.</p>
+    <p>• Shelters from other sources (📍 orange markers) may be inaccurate — <strong>verify on site</strong>.</p>
+    <button class="accept-btn" onclick="acceptDisclaimer()">✅ I understand and agree</button>
+  </div>
+</div>
+
 <div id="topbar">
   <div class="logo">🛡️ <span>Yalla Miklat</span></div>
   <div id="counter">—</div>
@@ -102,11 +167,18 @@
 
 <div id="map"></div>
 
+<!-- Legend -->
+<div id="legend">
+  <div><span class="dot dot-oref"></span> 🛡️ Pikud HaOref / municipal</div>
+  <div><span class="dot dot-other"></span> 📍 Other sources</div>
+</div>
+
 <button id="locate-btn" title="המיקום שלי">📍</button>
 
 <div id="info">
   <div class="handle"></div>
   <button class="close-btn" onclick="closeInfo()">✕</button>
+  <div id="info-source"></div>
   <div class="addr" id="info-addr"></div>
   <div class="meta" id="info-meta"></div>
   <div id="info-dist"></div>
@@ -118,9 +190,18 @@
 <script>
 (function() {
   // Config
-  const DATA_URL = "shelters.json";   // miklat_shelters.json format: [[lon,lat,addr,city],...]
+  const DATA_URL = "shelters.json";
   const ISRAEL_CENTER = [31.5, 34.8];
   const DEFAULT_ZOOM = 8;
+
+  // Disclaimer
+  if (!localStorage.getItem("disclaimer_accepted")) {
+    document.getElementById("disclaimer").classList.remove("hide");
+  }
+  window.acceptDisclaimer = function() {
+    localStorage.setItem("disclaimer_accepted", "1");
+    document.getElementById("disclaimer").classList.add("hide");
+  };
 
   // State
   let map, markers, userLatLng = null, userMarker = null;
@@ -140,12 +221,21 @@
   L.control.zoom({ position: "topright" }).addTo(map);
   L.control.attribution({ position: "bottomleft" }).addTo(map);
 
-  // Shelter icon
-  const shelterIcon = L.divIcon({
-    className: "",
-    html: '<div style="width:12px;height:12px;background:#2563eb;border:2px solid white;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,0.3)"></div>',
-    iconSize: [12, 12], iconAnchor: [6, 6],
-  });
+  // Shelter icons — oref (blue) vs other (orange)
+  function makeIcon(color) {
+    return L.divIcon({
+      className: "",
+      html: '<div style="width:12px;height:12px;background:'+color+';border:2px solid white;border-radius:50%;box-shadow:0 1px 4px rgba(0,0,0,0.3)"></div>',
+      iconSize: [12, 12], iconAnchor: [6, 6],
+    });
+  }
+  const iconOref = makeIcon("#2563eb");   // blue
+  const iconOther = makeIcon("#f59e0b");  // amber
+
+  function isOref(s) {
+    // 4 fields with name or city = official source
+    return s.length >= 4 && (s[2] || s[3]);
+  }
 
   // Marker cluster
   markers = L.markerClusterGroup({
@@ -175,22 +265,23 @@
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(data => {
       allShelters = data;
+      let orefCount = 0, otherCount = 0;
       const layerList = [];
       data.forEach((s, i) => {
         const lat = s[1], lon = s[0];
         if (!lat || !lon) return;
-        const addr = s[2] || "";
-        const city = s[3] || "";
-        const m = L.marker([lat, lon], { icon: shelterIcon });
+        const official = isOref(s);
+        if (official) orefCount++; else otherCount++;
+        const m = L.marker([lat, lon], { icon: official ? iconOref : iconOther });
         m._shelterIdx = i;
         m.on("click", () => showInfo(i));
         layerList.push(m);
       });
       markers.addLayers(layerList);
       map.addLayer(markers);
-      document.getElementById("counter").textContent = data.length.toLocaleString() + " מקלטים";
+      document.getElementById("counter").textContent =
+        data.length.toLocaleString() + " מקלטים (🛡️ " + orefCount.toLocaleString() + " | 📍 " + otherCount.toLocaleString() + ")";
       document.getElementById("loading").classList.add("hide");
-      // Auto-locate
       locateUser();
     })
     .catch(err => {
@@ -198,74 +289,67 @@
         '<p style="color:#dc2626">❌ שגיאה בטעינת נתונים</p><p style="font-size:13px;color:#94a3b8">' + err.message + '</p>';
     });
 
-  // Show info panel
+  // Show shelter info
   function showInfo(idx) {
     const s = allShelters[idx];
+    if (!s) return;
     const lat = s[1], lon = s[0];
-    const addr = s[2] || "מקלט ציבורי";
+    const addr = s[2] || "";
     const city = s[3] || "";
+    const official = isOref(s);
 
-    document.getElementById("info-addr").textContent = addr || "מקלט ציבורי";
-    document.getElementById("info-meta").textContent = city;
-
-    if (userLatLng) {
-      const d = dist(userLatLng.lat, userLatLng.lng, lat, lon);
-      document.getElementById("info-dist").innerHTML = '<span class="dist">' + fmtDist(d) + '</span>';
+    // Source badge
+    const srcEl = document.getElementById("info-source");
+    if (official) {
+      srcEl.innerHTML = '<span class="source-badge source-oref">🛡️ פיקוד העורף / עירוני</span>';
     } else {
-      document.getElementById("info-dist").innerHTML = "";
+      srcEl.innerHTML = '<span class="source-badge source-other">📍 מקור אחר — בדוק במקום</span>';
     }
 
-    const navUrl = "https://www.google.com/maps/dir/?api=1&destination=" + lat + "," + lon + "&travelmode=walking";
+    document.getElementById("info-addr").textContent = addr || "מקלט ציבורי";
+    document.getElementById("info-meta").textContent = city || (lat.toFixed(5) + ", " + lon.toFixed(5));
+
+    let distHtml = "";
+    if (userLatLng) {
+      const d = dist(userLatLng.lat, userLatLng.lng, lat, lon);
+      distHtml = '<span class="dist">' + fmtDist(d) + '</span>';
+    }
+    document.getElementById("info-dist").innerHTML = distHtml;
+
+    const gmaps = "https://www.google.com/maps/dir/?api=1&destination=" + lat + "," + lon + "&travelmode=walking";
+    const waze = "https://ul.waze.com/ul?ll=" + lat + "," + lon + "&navigate=yes&zoom=17";
     document.getElementById("info-nav").innerHTML =
-      '<a class="nav-btn" href="' + navUrl + '" target="_blank">🧭 ניווט</a>';
+      '<a class="nav-btn" href="' + gmaps + '" target="_blank">🚶 Google Maps</a> ' +
+      '<a class="nav-btn waze-btn" href="' + waze + '" target="_blank">🚗 Waze</a>';
 
     document.getElementById("info").classList.add("visible");
-    map.panTo([lat, lon]);
+    map.setView([lat, lon], Math.max(map.getZoom(), 16));
   }
 
   window.closeInfo = function() {
     document.getElementById("info").classList.remove("visible");
   };
 
-  // Close info on map click
-  map.on("click", () => closeInfo());
-
   // Locate user
   function locateUser() {
     if (!navigator.geolocation) return;
     const btn = document.getElementById("locate-btn");
     btn.classList.add("loading");
-    navigator.geolocation.getCurrentPosition(
-      pos => {
-        btn.classList.remove("loading");
-        userLatLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        if (userMarker) map.removeLayer(userMarker);
-        userMarker = L.circleMarker([userLatLng.lat, userLatLng.lng], {
-          radius: 8, fillColor: "#2563eb", fillOpacity: 1,
-          color: "white", weight: 3,
-        }).addTo(map);
-        // Add accuracy circle
-        L.circle([userLatLng.lat, userLatLng.lng], {
-          radius: pos.coords.accuracy, fillColor: "#2563eb",
-          fillOpacity: 0.08, stroke: false,
-        }).addTo(map);
-        map.setView([userLatLng.lat, userLatLng.lng], 15);
-      },
-      () => { btn.classList.remove("loading"); },
-      { enableHighAccuracy: true, timeout: 8000 }
-    );
+    navigator.geolocation.getCurrentPosition(pos => {
+      btn.classList.remove("loading");
+      userLatLng = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+      if (userMarker) map.removeLayer(userMarker);
+      userMarker = L.circleMarker([userLatLng.lat, userLatLng.lng], {
+        radius: 8, fillColor: "#3b82f6", fillOpacity: 1,
+        color: "white", weight: 3
+      }).addTo(map);
+      map.setView([userLatLng.lat, userLatLng.lng], 15);
+    }, () => {
+      btn.classList.remove("loading");
+    }, { enableHighAccuracy: true, timeout: 10000 });
   }
 
   document.getElementById("locate-btn").addEventListener("click", locateUser);
-
-  // Swipe-to-close info panel
-  let touchStart = 0;
-  const info = document.getElementById("info");
-  info.addEventListener("touchstart", e => { touchStart = e.touches[0].clientY; });
-  info.addEventListener("touchmove", e => {
-    const dy = e.touches[0].clientY - touchStart;
-    if (dy > 60) closeInfo();
-  });
 })();
 </script>
 </body>
