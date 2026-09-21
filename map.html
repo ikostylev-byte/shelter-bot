@@ -40,8 +40,9 @@
     border-radius: 50%; margin-left: 4px; vertical-align: middle;
     border: 1.5px solid white; box-shadow: 0 1px 2px rgba(0,0,0,0.2);
   }
-  #legend .dot-oref { background: #2563eb; }
-  #legend .dot-other { background: #f59e0b; }
+  #legend .dot-verified { background: #C0392B; }
+  #legend .dot-aggregated { background: #E67E22; }
+  #legend .dot-community { background: #7F8C8D; }
   #legend .dot-user { background: #10b981; }
 
   /* Locate button */
@@ -76,8 +77,9 @@
     display: inline-block; padding: 2px 8px; border-radius: 10px;
     font-size: 12px; font-weight: 600; margin-bottom: 8px;
   }
-  #info .source-oref { background: #dbeafe; color: #1d4ed8; }
-  #info .source-other { background: #fef3c7; color: #92400e; }
+  #info .source-verified { background: #fde8e6; color: #96281b; }
+  #info .source-aggregated { background: #fef3c7; color: #92400e; }
+  #info .source-community { background: #eceff1; color: #546e7a; }
   #info .dist { display: inline-block; background: #eff6ff; color: #2563eb; padding: 2px 8px; border-radius: 10px; font-size: 13px; font-weight: 600; }
   #info .nav-btn {
     display: inline-flex; align-items: center; gap: 6px;
@@ -154,8 +156,9 @@
     <p>• The developer <strong>does not guarantee</strong> the accuracy, completeness, or timeliness of the data.</p>
     <p>• The developer <strong>bears no responsibility</strong> for any consequences of using the service.</p>
     <p>• You use the service <strong>at your own risk</strong>.</p>
-    <p>• <strong>Prioritize</strong> Pikud HaOref / municipal shelters (🛡️ blue markers) — they are from official sources.</p>
-    <p>• Shelters from other sources (📍 orange markers) may be inaccurate — <strong>verify on site</strong>.</p>
+    <p>• <strong>Prioritize</strong> red markers (🛡️) — these come straight from municipal GIS registries.</p>
+    <p>• Amber markers (🟠) come from the miklat.co.il aggregator: usually correct, but not a primary source.</p>
+    <p>• Grey markers (⚪) come from OpenStreetMap and user reports — <strong>verify on site</strong>.</p>
     <button class="accept-btn" onclick="acceptDisclaimer()">✅ I understand and agree</button>
   </div>
 </div>
@@ -169,8 +172,9 @@
 
 <!-- Legend -->
 <div id="legend">
-  <div><span class="dot dot-oref"></span> 🛡️ Pikud HaOref / municipal</div>
-  <div><span class="dot dot-other"></span> 📍 Other sources</div>
+  <div><span class="dot dot-verified"></span> 🛡️ Municipal GIS — primary source</div>
+  <div><span class="dot dot-aggregated"></span> 🟠 miklat.co.il aggregator</div>
+  <div><span class="dot dot-community"></span> ⚪ OSM / user reports — verify on site</div>
 </div>
 
 <button id="locate-btn" title="המיקום שלי">📍</button>
@@ -223,7 +227,11 @@
   L.control.zoom({ position: "topright" }).addTo(map);
   L.control.attribution({ position: "bottomleft" }).addTo(map);
 
-  // Shelter icons — oref (blue) vs other (orange)
+  // Цвет маркера = уровень доверия к источнику.
+  // Раньше тут было isOref(s) = "есть имя или город, значит официальный" —
+  // то же угадывание, что и в боте. По факту 83% базы это агрегатор
+  // miklat.co.il, 15% муниципальные GIS, 2% OSM. Источник теперь лежит
+  // в самой записи, шестым элементом.
   function makeIcon(color) {
     return L.divIcon({
       className: "",
@@ -231,12 +239,21 @@
       iconSize: [12, 12], iconAnchor: [6, 6],
     });
   }
-  const iconOref = makeIcon("#2563eb");   // blue
-  const iconOther = makeIcon("#f59e0b");  // amber
-
-  function isOref(s) {
-    // 4 fields with name or city = official source
-    return s.length >= 4 && (s[2] || s[3]);
+  const ICONS = {
+    verified:   makeIcon("#C0392B"),
+    aggregated: makeIcon("#E67E22"),
+    community:  makeIcon("#7F8C8D"),
+  };
+  const SOURCE_TRUST = {
+    oref: "verified", muni: "verified", ta: "verified",
+    jlm: "verified", gov: "verified",
+    mkl: "aggregated",
+    osm: "community", user: "community", waze: "community",
+    kml: "community", other: "community",
+  };
+  function trustOf(s) {
+    const src = (s.length > 5 && s[5]) ? String(s[5]).split(":")[0] : "mkl";
+    return SOURCE_TRUST[src] || "community";
   }
 
   // Marker cluster
@@ -267,14 +284,14 @@
     .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(data => {
       allShelters = data;
-      let orefCount = 0, otherCount = 0;
+      const counts = { verified: 0, aggregated: 0, community: 0 };
       const layerList = [];
       data.forEach((s, i) => {
         const lat = s[1], lon = s[0];
         if (!lat || !lon) return;
-        const official = isOref(s);
-        if (official) orefCount++; else otherCount++;
-        const m = L.marker([lat, lon], { icon: official ? iconOref : iconOther });
+        const trust = trustOf(s);
+        counts[trust]++;
+        const m = L.marker([lat, lon], { icon: ICONS[trust] });
         m._shelterIdx = i;
         m.on("click", () => showInfo(i));
         layerList.push(m);
@@ -282,7 +299,9 @@
       markers.addLayers(layerList);
       map.addLayer(markers);
       document.getElementById("counter").textContent =
-        data.length.toLocaleString() + " מקלטים (🛡️ " + orefCount.toLocaleString() + " | 📍 " + otherCount.toLocaleString() + ")";
+        data.length.toLocaleString() + " מקלטים (🛡️ " + counts.verified.toLocaleString()
+        + " | 🟠 " + counts.aggregated.toLocaleString()
+        + " | ⚪ " + counts.community.toLocaleString() + ")";
       document.getElementById("loading").classList.add("hide");
       locateUser();
     })
@@ -298,15 +317,15 @@
     const lat = s[1], lon = s[0];
     const addr = s[2] || "";
     const city = s[3] || "";
-    const official = isOref(s);
+    const trust = trustOf(s);
 
-    // Source badge
-    const srcEl = document.getElementById("info-source");
-    if (official) {
-      srcEl.innerHTML = '<span class="source-badge source-oref">🛡️ פיקוד העורף / עירוני</span>';
-    } else {
-      srcEl.innerHTML = '<span class="source-badge source-other">📍 מקור אחר — בדוק במקום</span>';
-    }
+    // Плашка источника — тот же уровень доверия, что и цвет маркера
+    const TRUST_BADGE_HTML = {
+      verified:   '<span class="source-badge source-verified">🛡️ GIS עירוני — מקור ראשוני</span>',
+      aggregated: '<span class="source-badge source-aggregated">🟠 miklat.co.il — אגרגטור</span>',
+      community:  '<span class="source-badge source-community">⚪ OSM / דיווח משתמש — בדקו במקום</span>',
+    };
+    document.getElementById("info-source").innerHTML = TRUST_BADGE_HTML[trust];
 
     document.getElementById("info-addr").textContent = addr || "מקלט ציבורי";
     document.getElementById("info-meta").textContent = city || (lat.toFixed(5) + ", " + lon.toFixed(5));
